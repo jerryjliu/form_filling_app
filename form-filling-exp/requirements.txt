@@ -1,0 +1,9 @@
+# Core dependencies
+pymupdf>=1.24.0      # PDF processing (import as fitz)
+fastapi>=0.109.0     # Web framework
+uvicorn>=0.27.0      # ASGI server
+python-multipart>=0.0.6  # File upload handling
+pydantic>=2.0.0      # Structured output models
+
+# Anthropic SDK (for structured outputs beta)
+anthropic>=0.52.0    # Needs recent version for beta.messages.parse()

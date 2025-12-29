@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Form Filler</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+        
+        :root {
+            --bg-primary: #0a0a0b;
+            --bg-secondary: #111113;
+            --bg-tertiary: #1a1a1d;
+            --border: #2a2a2e;
+            --text-primary: #f4f4f5;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Outfit', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 3rem 2rem;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+        
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+        
+        .step-number {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            background: var(--accent);
+            border-radius: 50%;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 500;
+        }
+        
+        /* File Upload */
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--accent);
+            background: rgba(59, 130, 246, 0.05);
+        }
+        
+        .upload-zone.has-file {
+            border-color: var(--success);
+            background: rgba(34, 197, 94, 0.05);
+        }
+        
+        .upload-icon {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .upload-text {
+            color: var(--text-secondary);
+        }
+        
+        .file-name {
+            margin-top: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--success);
+        }
+        
+        #file-input {
+            display: none;
+        }
+        
+        /* Instructions Input */
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 1rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            font-size: 1rem;
+            resize: vertical;
+            transition: border-color 0.2s;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        
+        textarea::placeholder {
+            color: var(--text-muted);
+        }
+        
+        /* Options */
+        .options {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+        
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        
+        .checkbox-label input {
+            accent-color: var(--accent);
+            width: 16px;
+            height: 16px;
+        }
+        
+        /* Buttons */
+        .actions {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+        
+        button {
+            flex: 1;
+            padding: 0.875rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            background: var(--accent-hover);
+        }
+        
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        
+        .btn-secondary:hover:not(:disabled) {
+            background: var(--border);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Results */
+        .results {
+            display: none;
+        }
+        
+        .results.visible {
+            display: block;
+        }
+        
+        .result-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 500;
+        }
+        
+        .status.success { color: var(--success); }
+        .status.error { color: var(--error); }
+        .status.loading { color: var(--warning); }
+        
+        .fields-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .field-item {
+            padding: 0.75rem;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .field-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+        
+        .field-id {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent);
+        }
+        
+        .field-type {
+            font-size: 0.75rem;
+            padding: 0.125rem 0.5rem;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            color: var(--text-muted);
+        }
+        
+        .field-context {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+        }
+        
+        .field-value {
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            border-left: 3px solid var(--success);
+        }
+        
+        .field-value .label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+        
+        .field-value .value {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--success);
+        }
+        
+        /* Loading */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 1rem 1.5rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s;
+        }
+        
+        .toast.visible {
+            transform: translateY(0);
+            opacity: 1;
+        }
+        
+        .toast.success { border-left: 3px solid var(--success); }
+        .toast.error { border-left: 3px solid var(--error); }
+        
+        /* Footer */
+        footer {
+            margin-top: 3rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+        
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PDF Form Filler</h1>
+            <p class="subtitle">Fill PDF forms using natural language</p>
+        </header>
+        
+        <div class="card">
+            <div class="card-header">
+                <span class="step-number">1</span>
+                <span class="card-title">Upload PDF</span>
+            </div>
+            <div class="upload-zone" id="upload-zone">
+                <div class="upload-icon">📄</div>
+                <p class="upload-text">Drop a PDF here or click to upload</p>
+                <p class="file-name" id="file-name"></p>
+            </div>
+            <input type="file" id="file-input" accept=".pdf">
+        </div>
+        
+        <div class="card">
+            <div class="card-header">
+                <span class="step-number">2</span>
+                <span class="card-title">Describe what to fill</span>
+            </div>
+            <textarea 
+                id="instructions" 
+                placeholder="Describe what you want to fill in natural language. Examples:
+
+• My name is John Doe, email is john@example.com
+• Date: 12/28/2024, check the 'I agree' box
+• Fill in my address: 123 Main Street, San Francisco, CA 94102"
+            ></textarea>
+            <div class="options">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="use-llm" checked>
+                    Use AI (requires ANTHROPIC_API_KEY)
+                </label>
+            </div>
+        </div>
+        
+        <div class="actions">
+            <button class="btn-secondary" id="analyze-btn" disabled>
+                Analyze Fields
+            </button>
+            <button class="btn-primary" id="fill-btn" disabled>
+                Fill & Download
+            </button>
+        </div>
+        
+        <div class="card results" id="results">
+            <div class="result-header">
+                <span class="card-title">Results</span>
+                <span class="status" id="status"></span>
+            </div>
+            <div class="fields-list" id="fields-list"></div>
+        </div>
+        
+        <footer>
+            <p>
+                API docs available at <a href="/docs" target="_blank">/docs</a>
+            </p>
+        </footer>
+    </div>
+    
+    <div class="toast" id="toast"></div>
+    
+    <script>
+        // Elements
+        const uploadZone = document.getElementById('upload-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileName = document.getElementById('file-name');
+        const instructions = document.getElementById('instructions');
+        const useLlm = document.getElementById('use-llm');
+        const analyzeBtn = document.getElementById('analyze-btn');
+        const fillBtn = document.getElementById('fill-btn');
+        const results = document.getElementById('results');
+        const status = document.getElementById('status');
+        const fieldsList = document.getElementById('fields-list');
+        const toast = document.getElementById('toast');
+        
+        let currentFile = null;
+        
+        // File upload handling
+        uploadZone.addEventListener('click', () => fileInput.click());
+        
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length && files[0].type === 'application/pdf') {
+                handleFile(files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                handleFile(fileInput.files[0]);
+            }
+        });
+        
+        function handleFile(file) {
+            currentFile = file;
+            fileName.textContent = file.name;
+            uploadZone.classList.add('has-file');
+            updateButtons();
+        }
+        
+        function updateButtons() {
+            analyzeBtn.disabled = !currentFile;
+            fillBtn.disabled = !currentFile || !instructions.value.trim();
+        }
+        
+        instructions.addEventListener('input', updateButtons);
+        
+        // Analyze fields
+        analyzeBtn.addEventListener('click', async () => {
+            if (!currentFile) return;
+            
+            analyzeBtn.disabled = true;
+            setStatus('loading', 'Analyzing...');
+            results.classList.add('visible');
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    setStatus('success', `Found ${data.field_count} fields`);
+                    renderFields(data.fields);
+                } else {
+                    setStatus('error', data.detail || 'Failed');
+                    fieldsList.innerHTML = '';
+                }
+            } catch (err) {
+                setStatus('error', 'Connection error');
+                console.error(err);
+            }
+            
+            analyzeBtn.disabled = false;
+        });
+        
+        // Fill PDF
+        fillBtn.addEventListener('click', async () => {
+            if (!currentFile || !instructions.value.trim()) return;
+            
+            fillBtn.disabled = true;
+            fillBtn.textContent = 'Processing...';
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('instructions', instructions.value);
+            formData.append('use_llm', useLlm.checked);
+            
+            try {
+                const response = await fetch('/fill', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = currentFile.name.replace('.pdf', '_filled.pdf');
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    
+                    const fieldsFilled = response.headers.get('X-Fields-Filled');
+                    showToast(`Downloaded! ${fieldsFilled} fields filled.`, 'success');
+                } else {
+                    const data = await response.json();
+                    showToast(data.detail || 'Failed to fill PDF', 'error');
+                }
+            } catch (err) {
+                showToast('Connection error', 'error');
+                console.error(err);
+            }
+            
+            fillBtn.disabled = false;
+            fillBtn.textContent = 'Fill & Download';
+        });
+        
+        // Preview (Analyze + show what would be filled)
+        async function previewFill() {
+            if (!currentFile || !instructions.value.trim()) return;
+            
+            setStatus('loading', 'Previewing...');
+            results.classList.add('visible');
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('instructions', instructions.value);
+            formData.append('use_llm', useLlm.checked);
+            
+            try {
+                const response = await fetch('/fill-preview', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    setStatus('success', data.message);
+                    renderFieldsWithEdits(data.fields, data.edits);
+                } else {
+                    setStatus('error', data.detail || data.message || 'Failed');
+                }
+            } catch (err) {
+                setStatus('error', 'Connection error');
+            }
+        }
+        
+        function setStatus(type, text) {
+            status.className = 'status ' + type;
+            if (type === 'loading') {
+                status.innerHTML = `<span class="spinner"></span> ${text}`;
+            } else {
+                const icon = type === 'success' ? '✓' : type === 'error' ? '✗' : '';
+                status.innerHTML = `${icon} ${text}`;
+            }
+        }
+        
+        function renderFields(fields) {
+            if (!fields.length) {
+                fieldsList.innerHTML = '<p style="color: var(--text-muted);">No fillable form fields found in this PDF.</p>';
+                return;
+            }
+            
+            fieldsList.innerHTML = fields.map(f => `
+                <div class="field-item">
+                    <div class="field-header">
+                        <span class="field-id">${f.field_id}</span>
+                        <span class="field-type">${f.field_type}</span>
+                    </div>
+                    <div class="field-context">${escapeHtml(f.label_context || 'No context')}</div>
+                    ${f.current_value ? `<div class="field-value"><div class="label">Current:</div><div class="value">${escapeHtml(f.current_value)}</div></div>` : ''}
+                </div>
+            `).join('');
+        }
+        
+        function renderFieldsWithEdits(fields, edits) {
+            const editMap = {};
+            edits.forEach(e => editMap[e.field_id] = e.value);
+            
+            fieldsList.innerHTML = fields.map(f => {
+                const willFill = editMap[f.field_id];
+                return `
+                    <div class="field-item" style="${willFill !== undefined ? 'border-left: 3px solid var(--success);' : ''}">
+                        <div class="field-header">
+                            <span class="field-id">${f.field_id}</span>
+                            <span class="field-type">${f.field_type}</span>
+                        </div>
+                        <div class="field-context">${escapeHtml(f.label_context || 'No context')}</div>
+                        ${willFill !== undefined ? `
+                            <div class="field-value">
+                                <div class="label">Will fill with:</div>
+                                <div class="value">${escapeHtml(String(willFill))}</div>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function showToast(message, type) {
+            toast.textContent = message;
+            toast.className = 'toast visible ' + type;
+            setTimeout(() => toast.classList.remove('visible'), 4000);
+        }
+        
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
+
