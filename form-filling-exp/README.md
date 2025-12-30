@@ -1,177 +1,251 @@
 # PDF Form Filler
 
-A simple app to fill PDF forms using natural language instructions.
+An AI-powered application for filling PDF forms using natural language instructions. Built with the Claude Agent SDK and LlamaParse.
 
-**Scope:** This app only works with PDFs that have native AcroForm fields (fillable form fields). It does not support OCR or drawing on non-form PDFs.
+## Features
+
+- **Natural Language Form Filling**: Describe what you want to fill, and the AI agent handles the rest
+- **Multi-Turn Conversations**: Iteratively refine form edits across multiple messages
+- **Context File Upload**: Upload reference documents (PDF, DOCX, PPTX, images) that the agent uses to extract information for filling forms
+- **Real-Time Streaming**: Watch the agent's progress as it analyzes and fills your form
+- **Session Persistence**: Sessions survive page reloads and server restarts (SQLite + file storage)
+- **Dual PDF View**: Toggle between original and filled PDF views
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Next.js Frontend                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────────┐ │
+│  │ PDF Viewer  │  │ Chat Panel  │  │ Context Files Upload     │ │
+│  └─────────────┘  └─────────────┘  └──────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ SSE Streaming
+┌─────────────────────────────────────────────────────────────────┐
+│                      FastAPI Backend                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────────┐ │
+│  │ PDF Process │  │ Claude Agent│  │ LlamaParse Integration   │ │
+│  │ (PyMuPDF)   │  │ SDK         │  │ (Context File Parsing)   │ │
+│  └─────────────┘  └─────────────┘  └──────────────────────────┘ │
+│                         │                                        │
+│                         ▼                                        │
+│              ┌──────────────────────┐                           │
+│              │  Session Manager     │                           │
+│              │  (SQLite + Files)    │                           │
+│              └──────────────────────┘                           │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
-```bash
-# 1. Create a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+### Prerequisites
 
-# 2. Install dependencies
+- Python 3.10+
+- Node.js 18+
+- Anthropic API key
+- LlamaCloud API key (optional, for context file parsing)
+
+### 1. Clone and Setup
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd form-filling-exp
+
+# Create Python virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install Python dependencies
 pip install -r requirements.txt
 
-# 3. Set your Anthropic API key
-export ANTHROPIC_API_KEY=sk-ant-your-key-here
-
-# 4. Run the server
-cd backend
-python main.py
+# Install frontend dependencies
+cd web
+npm install
+cd ..
 ```
 
-Then open http://localhost:8000 in your browser.
+### 2. Environment Variables
+
+```bash
+# Required
+export ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Optional (for context file parsing with LlamaParse)
+export LLAMA_CLOUD_API_KEY=llx-your-key-here
+```
+
+### 3. Run the Application
+
+```bash
+# Terminal 1: Start the backend
+cd backend
+python main.py
+# Backend runs on http://localhost:8000
+
+# Terminal 2: Start the frontend
+cd web
+npm run dev
+# Frontend runs on http://localhost:3000
+```
+
+Open http://localhost:3000 in your browser.
 
 ## Project Structure
 
 ```
 .
 ├── backend/
-│   ├── main.py           # FastAPI server - API endpoints
-│   ├── pdf_processor.py  # Core PDF logic - edit this for PDF processing
-│   ├── llm.py            # LLM integration - edit this for prompts/models
-│   └── test_local.py     # CLI testing script
-├── frontend/
-│   └── index.html        # Web UI (single file, no build step)
+│   ├── main.py           # FastAPI server with SSE streaming endpoints
+│   ├── agent.py          # Claude Agent SDK integration with MCP tools
+│   ├── pdf_processor.py  # PDF field detection and editing (PyMuPDF)
+│   ├── parser.py         # LlamaParse integration for context files
+│   ├── llm.py            # Structured output LLM for simple fills
+│   ├── sessions.db       # SQLite database for session persistence
+│   └── sessions_data/    # PDF file storage for sessions
+├── web/
+│   ├── src/
+│   │   ├── app/
+│   │   │   └── page.tsx          # Main application page
+│   │   ├── components/
+│   │   │   ├── ChatPanel.tsx     # Chat interface with agent
+│   │   │   ├── ContextFilesUpload.tsx  # Context file upload UI
+│   │   │   ├── PdfViewer.tsx     # PDF preview component
+│   │   │   └── ...
+│   │   └── lib/
+│   │       ├── api.ts            # Backend API client
+│   │       └── session.ts        # Session persistence helpers
+│   └── package.json
 ├── requirements.txt
 └── README.md
 ```
 
-## Editing the Python Files
+## Usage
 
-### `backend/pdf_processor.py`
-Core PDF processing logic. Key functions to customize:
+### Basic Form Filling
 
-- `detect_form_fields(pdf_bytes)` - Detects AcroForm fields in a PDF
-- `apply_edits(pdf_bytes, edits)` - Applies field edits to a PDF
-- `_extract_nearby_text()` - Controls how context is extracted for each field
+1. **Upload a PDF**: Drag and drop or click to upload a PDF with fillable form fields
+2. **Enter Instructions**: Type natural language instructions like:
+   - "My name is John Doe, email john@example.com"
+   - "Fill all date fields with today's date"
+   - "Check all the boxes"
+3. **Watch the Agent**: See real-time progress as the agent analyzes fields and fills them
+4. **Download**: Click the download button to get your filled PDF
 
-**Test directly:**
-```bash
-cd backend
-python pdf_processor.py path/to/your.pdf
-```
+### Using Context Files
 
-### `backend/llm.py`
-LLM integration using LlamaIndex's Anthropic integration with structured output.
+For complex forms, upload reference documents that contain the information to fill:
 
-Key functions:
-- `map_instructions_to_fields(instructions, fields)` - Uses Claude to parse instructions
-- `simple_keyword_mapping()` - No-LLM fallback with simple key:value parsing
-- `_build_field_descriptions()` - Formats fields for the LLM prompt
+1. **Upload Context Files**: In the chat panel, upload up to 5 files (PDF, DOCX, PPTX, images, or text files)
+2. **Choose Parse Mode**:
+   - **Cost Effective**: Faster, lower cost parsing
+   - **Agentic Plus**: Higher quality extraction for complex documents
+3. **Reference in Instructions**: "Fill the form using the information from my resume"
 
-**Configuration:**
-- `ANTHROPIC_API_KEY` - Your Anthropic API key (required)
-- `ANTHROPIC_MODEL` - Model to use (default: `claude-sonnet-4-5`)
+### Multi-Turn Editing
 
-**Available models (structured outputs supported):**
-- `claude-sonnet-4-5` - Recommended, fast and capable
-- `claude-opus-4-5` - Most capable
-- `claude-haiku-4-5` - Fastest
+Continue refining your form across multiple messages:
 
-**Test directly:**
-```bash
-cd backend
-ANTHROPIC_API_KEY=sk-ant-xxx python llm.py
-```
+- "Change the phone number to 555-1234"
+- "Uncheck the marketing consent box"
+- "Update the address to 456 Oak St"
 
-### `backend/main.py`
-FastAPI server. Endpoints:
+The agent remembers previous edits and only modifies what you ask.
 
-- `POST /analyze` - Upload PDF, get detected form fields
-- `POST /fill` - Fill form fields with natural language, download result
-- `POST /fill-preview` - Preview what fields would be filled
+## API Endpoints
 
-## API Usage
+### Core Endpoints
 
-### Analyze a PDF
-```bash
-curl -X POST http://localhost:8000/analyze \
-  -F "file=@your-form.pdf"
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/analyze` | POST | Analyze PDF and detect form fields |
+| `/fill-agent-stream` | POST | Fill form with streaming agent (SSE) |
+| `/parse-files` | POST | Parse context files with LlamaParse (SSE) |
 
-### Fill a PDF
-```bash
-curl -X POST http://localhost:8000/fill \
-  -F "file=@your-form.pdf" \
-  -F "instructions=My name is John Doe, email is john@example.com" \
-  -o filled.pdf
-```
+### Session Endpoints
 
-### Fill without LLM (simple keyword matching)
-```bash
-curl -X POST http://localhost:8000/fill \
-  -F "file=@your-form.pdf" \
-  -F "instructions=name: John Doe, email: john@example.com" \
-  -F "use_llm=false" \
-  -o filled.pdf
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/session/{id}` | GET | Get session info |
+| `/session/{id}/pdf` | GET | Get filled PDF bytes |
+| `/session/{id}/original-pdf` | GET | Get original PDF bytes |
+| `/session/{id}/context-files` | GET | Get parsed context files |
 
-## Using Without Anthropic API
+### Utility Endpoints
 
-You can use this without an API key by:
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/parse-status` | GET | Check LlamaParse availability |
+| `/health` | GET | Health check |
+| `/docs` | GET | Swagger API documentation |
 
-1. **Simple keyword matching**: Uncheck "Use AI" in the UI, or pass `use_llm=false`
-   - Format instructions as `key: value` pairs
-   - e.g., "name: John Doe, email: john@example.com"
+## Configuration
 
-2. **Use a different model**: Edit `backend/llm.py` to swap providers. LlamaIndex supports many LLMs:
-   - OpenAI: `llama-index-llms-openai`
-   - Local models via Ollama: `llama-index-llms-ollama`
-   - Together AI: `llama-index-llms-together`
-   - See: https://developers.llamaindex.ai/python/framework/understanding/using_llms/
+### Environment Variables
 
-## Anthropic Structured Outputs
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude |
+| `LLAMA_CLOUD_API_KEY` | No | LlamaCloud API key for LlamaParse |
 
-This app uses Anthropic's structured outputs beta for reliable JSON parsing via Pydantic models:
+### LlamaParse Modes
 
-```python
-import anthropic
-from pydantic import BaseModel
+| Mode | Description | Best For |
+|------|-------------|----------|
+| `cost_effective` | Standard parsing with LLM | Most documents |
+| `agentic_plus` | Advanced agent-based parsing | Complex layouts, tables |
 
-class FormEdits(BaseModel):
-    edits: list[FieldEdit]
+## Technical Details
 
-client = anthropic.Anthropic()
-response = client.beta.messages.parse(
-    model="claude-sonnet-4-5",
-    betas=["structured-outputs-2025-11-13"],
-    messages=[{"role": "user", "content": prompt}],
-    output_format=FormEdits,
-)
-result = response.parsed_output  # Pydantic model
-```
+### Claude Agent SDK
 
-Reference:
-- [Anthropic Structured Outputs docs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+The application uses the Claude Agent SDK with custom MCP tools for form filling:
 
-## Common Issues
+- `load_pdf` - Load and analyze a PDF
+- `list_all_fields` - Get all form fields
+- `search_fields` - Search fields by query
+- `set_field` - Stage a field edit
+- `commit_edits` - Apply all staged edits
 
-**"No fillable form fields found"**
-- This app only works with PDFs that have native AcroForm fields
-- Many PDFs are flat images or don't have fillable fields
-- Try with official government/tax forms - they often have fillable fields
+### Session Persistence
 
-**"ANTHROPIC_API_KEY environment variable is required"**
-- Set your API key: `export ANTHROPIC_API_KEY=sk-ant-xxx`
-- Or uncheck "Use AI" in the UI to use simple keyword matching
+Sessions are persisted using:
+- **SQLite**: Metadata, applied edits, context files (JSON)
+- **File System**: PDF bytes (original and filled)
+- **Frontend localStorage**: Session ID mapping
 
-**Fields not being filled correctly**
-- Run `/analyze` first to see what fields are detected
-- Check the `label_context` to see what text the LLM uses to understand each field
-- Adjust your instructions to match the context
+### Supported File Types
+
+**Form PDFs**: Must have native AcroForm fields (fillable fields)
+
+**Context Files**:
+- Documents: PDF, DOCX, PPTX, DOC, PPT, XLSX, XLS
+- Images: PNG, JPG, JPEG, GIF, BMP, TIFF, WEBP
+- Text: TXT, MD, CSV, JSON, XML, HTML, and code files
+
+## Limitations
+
+- Only works with PDFs that have native AcroForm fields
+- Does not support OCR or drawing on flat PDFs
+- Context file parsing requires LlamaCloud API key
 
 ## Development
 
 ```bash
-# Run with auto-reload
+# Run backend with auto-reload
 cd backend
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8000
 
-# Or run directly
-python main.py
+# Run frontend with hot-reload
+cd web
+npm run dev
+
+# Build frontend for production
+cd web
+npm run build
 ```
 
-API documentation is available at http://localhost:8000/docs (Swagger UI).
+## License
+
+MIT
