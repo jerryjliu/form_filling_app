@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { ChatMessage as ChatMessageType } from '@/types';
 import ChatMessage from './ChatMessage';
+import ContextFilesUpload, { ContextFile, ParseProgress } from './ContextFilesUpload';
 
 interface ChatPanelProps {
   messages: ChatMessageType[];
@@ -10,6 +11,11 @@ interface ChatPanelProps {
   isProcessing: boolean;
   disabled?: boolean;
   statusMessage?: string;
+  contextFiles?: ContextFile[];
+  onContextFilesChange?: (files: ContextFile[]) => void;
+  onParseFiles?: (files: File[], parseMode: 'cost_effective' | 'agentic_plus') => Promise<void>;
+  isUploadingContext?: boolean;
+  parseProgress?: ParseProgress | null;
 }
 
 export default function ChatPanel({
@@ -18,6 +24,11 @@ export default function ChatPanel({
   isProcessing,
   disabled,
   statusMessage,
+  contextFiles = [],
+  onContextFilesChange,
+  onParseFiles,
+  isUploadingContext = false,
+  parseProgress = null,
 }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -112,6 +123,20 @@ export default function ChatPanel({
           </div>
         )}
       </div>
+
+      {/* Context Files Upload */}
+      {onContextFilesChange && onParseFiles && (
+        <div className="px-4 py-3 border-t border-border">
+          <ContextFilesUpload
+            files={contextFiles}
+            onFilesChange={onContextFilesChange}
+            onParseFiles={onParseFiles}
+            isUploading={isUploadingContext}
+            parseProgress={parseProgress}
+            disabled={disabled || isProcessing}
+          />
+        </div>
+      )}
 
       {/* Input */}
       <form onSubmit={handleSubmit} className="p-4 border-t border-border">

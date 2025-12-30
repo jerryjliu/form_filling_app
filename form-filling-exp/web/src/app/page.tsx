@@ -2,7 +2,8 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { ChatMessage, FormField, PdfDisplayMode, StreamEvent, AgentLogEntry } from '@/types';
-import { analyzePdf, streamAgentFill, hexToBytes, getSessionPdf, getSessionOriginalPdf } from '@/lib/api';
+import { analyzePdf, streamAgentFill, hexToBytes, getSessionPdf, getSessionOriginalPdf, streamParseFiles, getSessionContextFiles } from '@/lib/api';
+import { ContextFile, ParseProgress } from '@/components/ContextFilesUpload';
 import {
   createSession,
   createMessage,
@@ -34,6 +35,10 @@ export default function Home() {
   const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
   // Track user session ID for backend state isolation (concurrent user support)
   const [userSessionId, setUserSessionId] = useState<string | null>(null);
+  // Context files for the agent
+  const [contextFiles, setContextFiles] = useState<ContextFile[]>([]);
+  const [isUploadingContext, setIsUploadingContext] = useState(false);
+  const [parseProgress, setParseProgress] = useState<ParseProgress | null>(null);
 
   // Initialize session from URL or create new one
   useEffect(() => {
@@ -56,16 +61,18 @@ export default function Home() {
           console.log('[DEBUG] Fetching PDFs from backend for userSessionId:', stored.userSessionId);
           setUserSessionId(stored.userSessionId);
 
-          // Fetch both original and filled PDFs in parallel
+          // Fetch both original and filled PDFs and context files in parallel
           Promise.all([
             getSessionPdf(stored.userSessionId),
             getSessionOriginalPdf(stored.userSessionId),
-          ]).then(([filledBytes, originalBytes]) => {
-            console.log('[DEBUG] PDF fetch results:', {
+            getSessionContextFiles(stored.userSessionId),
+          ]).then(([filledBytes, originalBytes, contextFilesData]) => {
+            console.log('[DEBUG] Session fetch results:', {
               hasFilledBytes: !!filledBytes,
               filledSize: filledBytes?.length,
               hasOriginalBytes: !!originalBytes,
               originalSize: originalBytes?.length,
+              contextFilesCount: contextFilesData?.length,
             });
             if (filledBytes) {
               setFilledPdfBytes(filledBytes);
@@ -73,6 +80,13 @@ export default function Home() {
             }
             if (originalBytes) {
               setOriginalPdfBytes(originalBytes);
+            }
+            if (contextFilesData) {
+              setContextFiles(contextFilesData.map(f => ({
+                filename: f.filename,
+                content: f.content,
+                was_parsed: f.was_parsed,
+              })));
             }
           });
         }
@@ -118,6 +132,7 @@ export default function Home() {
       setAppliedEdits(null);  // Clear edits when resetting
       setAgentSessionId(null);  // Clear agent session when resetting
       setUserSessionId(null);  // Clear user session when resetting
+      setContextFiles([]);  // Clear context files when resetting
       return;
     }
 
@@ -128,6 +143,7 @@ export default function Home() {
     setAppliedEdits(null);  // Clear edits for new file
     setAgentSessionId(null);  // Clear agent session for new file
     setUserSessionId(null);  // Clear user session for new file
+    setContextFiles([]);  // Clear context files for new file
     setIsAnalyzing(true);
 
     try {
@@ -156,6 +172,63 @@ export default function Home() {
       setIsAnalyzing(false);
     }
   }, []);
+
+  // Handle parsing context files
+  const handleParseFiles = useCallback(
+    async (files: File[], parseMode: 'cost_effective' | 'agentic_plus') => {
+      setIsUploadingContext(true);
+      setParseProgress(null);
+
+      // Generate a userSessionId if one doesn't exist yet
+      // This ensures context files can be stored in the backend session
+      let currentUserSessionId = userSessionId;
+      if (!currentUserSessionId) {
+        currentUserSessionId = generateId() + '-' + Date.now();
+        setUserSessionId(currentUserSessionId);
+      }
+
+      try {
+        const results: ContextFile[] = [];
+
+        for await (const event of streamParseFiles(files, parseMode, currentUserSessionId)) {
+          if (event.type === 'progress' && event.current !== undefined && event.total !== undefined && event.filename && event.status) {
+            setParseProgress({
+              current: event.current,
+              total: event.total,
+              filename: event.filename,
+              status: event.status,
+              error: event.error,
+            });
+          }
+
+          if (event.type === 'complete' && event.results) {
+            for (const result of event.results) {
+              if (result.content && !result.error) {
+                results.push({
+                  filename: result.filename,
+                  content: result.content,
+                  was_parsed: result.parsed,
+                });
+              }
+            }
+          }
+        }
+
+        // Add new files to existing context files
+        setContextFiles((prev) => [...prev, ...results]);
+      } catch (error) {
+        console.error('Parse files error:', error);
+        setMessages((prev) => [
+          ...prev,
+          createMessage('system', `Error parsing files: ${error instanceof Error ? error.message : 'Unknown error'}`),
+        ]);
+      } finally {
+        setIsUploadingContext(false);
+        setParseProgress(null);
+      }
+    },
+    [userSessionId]
+  );
 
   // Handle sending a chat message
   const handleSendMessage = useCallback(
@@ -394,6 +467,11 @@ export default function Home() {
             isProcessing={isProcessing}
             disabled={!file || fields.length === 0}
             statusMessage={statusMessage}
+            contextFiles={contextFiles}
+            onContextFilesChange={setContextFiles}
+            onParseFiles={handleParseFiles}
+            isUploadingContext={isUploadingContext}
+            parseProgress={parseProgress}
           />
         </div>
       </main>

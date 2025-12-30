@@ -16,12 +16,13 @@ better accuracy, error recovery, and support for multi-turn conversations.
 The single-shot /fill endpoint is maintained for backwards compatibility.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -29,6 +30,10 @@ from pydantic import BaseModel
 from pdf_processor import detect_form_fields, edit_pdf_with_instructions, get_form_summary
 from llm import map_instructions_to_fields
 from agent import run_agent, run_agent_stream, AGENT_SDK_AVAILABLE, AGENT_SDK_ERROR, _session_manager
+from parser import (
+    parse_files_stream, needs_parsing, is_simple_text,
+    LLAMAPARSE_AVAILABLE, LLAMAPARSE_ERROR, ParsedFile
+)
 
 
 # ============================================================================
@@ -601,6 +606,102 @@ async def health_check():
 
 
 # ============================================================================
+# Context File Parsing
+# ============================================================================
+
+@app.post("/parse-files")
+async def parse_context_files(
+    files: list[UploadFile] = File(...),
+    parse_mode: str = Form("cost_effective"),
+    user_session_id: Optional[str] = Form(None),
+):
+    """
+    Parse uploaded context files using LlamaParse (for complex files) or direct read (for simple text).
+
+    Streams progress updates via SSE.
+
+    Args:
+        files: Up to 5 files to parse
+        parse_mode: "cost_effective" or "agentic_plus"
+        user_session_id: Optional session ID to associate parsed files with
+
+    Returns:
+        SSE stream with progress updates and final results
+    """
+    # Validate file count
+    if len(files) > 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 files allowed")
+
+    if len(files) == 0:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    # Validate parse mode
+    if parse_mode not in ("cost_effective", "agentic_plus"):
+        raise HTTPException(status_code=400, detail="Invalid parse_mode. Use 'cost_effective' or 'agentic_plus'")
+
+    # Check if LlamaParse is available for files that need it
+    files_needing_parse = [f for f in files if needs_parsing(f.filename or "")]
+    if files_needing_parse and not LLAMAPARSE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LlamaParse not available: {LLAMAPARSE_ERROR}. Cannot parse: {[f.filename for f in files_needing_parse]}"
+        )
+
+    # Read all file bytes
+    file_data = []
+    for f in files:
+        content = await f.read()
+        file_data.append((content, f.filename or "unknown"))
+
+    async def event_stream():
+        yield f"data: {json.dumps({'type': 'init', 'message': f'Starting to parse {len(file_data)} file(s)...'})}\n\n"
+
+        try:
+            async for event in parse_files_stream(file_data, parse_mode):
+                yield f"data: {json.dumps(event)}\n\n"
+
+                # If this is the complete event, also store in session if session_id provided
+                if event.get("type") == "complete" and user_session_id:
+                    # Use get_or_create to ensure session exists for storing context files
+                    session = _session_manager.get_or_create_session(user_session_id)
+                    if session:
+                        # Store parsed files in session
+                        parsed_files = []
+                        for result in event.get("results", []):
+                            if result.get("content"):
+                                parsed_files.append(ParsedFile(
+                                    filename=result["filename"],
+                                    content=result["content"],
+                                    was_parsed=result.get("parsed", False)
+                                ))
+                        session.context_files = parsed_files
+                        # Save session to persist the context files
+                        _session_manager._save_session_to_db(session)
+                        print(f"[Parse] Stored {len(parsed_files)} context files in session {user_session_id}")
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
+
+
+@app.get("/parse-status")
+async def get_parse_status():
+    """Check if LlamaParse is available."""
+    return {
+        "llamaparse_available": LLAMAPARSE_AVAILABLE,
+        "llamaparse_error": LLAMAPARSE_ERROR if not LLAMAPARSE_AVAILABLE else None,
+    }
+
+
+# ============================================================================
 # Session PDF Retrieval
 # ============================================================================
 
@@ -657,12 +758,48 @@ async def get_session_info(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Get context files info (without full content)
+    context_files_info = []
+    if session.context_files:
+        for cf in session.context_files:
+            if isinstance(cf, dict):
+                context_files_info.append({
+                    "filename": cf.get("filename", "unknown"),
+                    "was_parsed": cf.get("was_parsed", False),
+                    "content_length": len(cf.get("content", ""))
+                })
+            else:
+                context_files_info.append({
+                    "filename": getattr(cf, "filename", "unknown"),
+                    "was_parsed": getattr(cf, "was_parsed", False),
+                    "content_length": len(getattr(cf, "content", ""))
+                })
+
     return {
         "session_id": session.session_id,
         "has_pdf": session.current_pdf_bytes is not None,
         "has_original_pdf": session.original_pdf_bytes is not None,
         "applied_edits": session.applied_edits,
         "field_count": len(session.applied_edits) if session.applied_edits else 0,
+        "context_files": context_files_info,
+        "context_files_count": len(context_files_info),
+    }
+
+
+@app.get("/session/{session_id}/context-files")
+async def get_session_context_files(session_id: str):
+    """
+    Get the full context files for a session.
+
+    Returns the list of context files with their full content.
+    """
+    context_files = _session_manager.get_session_context_files(session_id)
+    if context_files is None:
+        raise HTTPException(status_code=404, detail="Session not found or no context files")
+
+    return {
+        "session_id": session_id,
+        "context_files": context_files,
     }
 
 

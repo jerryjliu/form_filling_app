@@ -89,6 +89,8 @@ class FormFillingSession:
         self.original_pdf_bytes: bytes | None = None
         # Track if this is a continuation
         self.is_continuation: bool = False
+        # Context files parsed with LlamaParse (list of ParsedFile-like dicts)
+        self.context_files: list = []
 
     def reset(self):
         """Reset session state for a new form filling operation."""
@@ -103,6 +105,7 @@ class FormFillingSession:
         self.current_pdf_bytes = None
         self.original_pdf_bytes = None
         self.is_continuation = False
+        # Don't clear context_files on reset - they persist across form operations
 
     def soft_reset(self):
         """Reset for a new turn but preserve the filled PDF state."""
@@ -157,6 +160,7 @@ class SessionManager:
                         applied_edits TEXT,
                         pdf_file_path TEXT,
                         original_pdf_file_path TEXT,
+                        context_files TEXT,
                         created_at REAL,
                         updated_at REAL
                     )
@@ -184,6 +188,14 @@ class SessionManager:
                 try:
                     conn.execute("ALTER TABLE sessions ADD COLUMN original_pdf_file_path TEXT")
                     print("[SessionManager] Added original_pdf_file_path column")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
+            # Add context_files column if it doesn't exist
+            if 'context_files' not in columns and columns:
+                try:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN context_files TEXT")
+                    print("[SessionManager] Added context_files column")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
 
@@ -225,6 +237,14 @@ class SessionManager:
                         except json.JSONDecodeError:
                             session.applied_edits = {}
 
+                    # Load context_files JSON if available
+                    context_files_json = row['context_files'] if 'context_files' in row.keys() else None
+                    if context_files_json:
+                        try:
+                            session.context_files = json.loads(context_files_json)
+                        except json.JSONDecodeError:
+                            session.context_files = []
+
                     self._sessions[session.session_id] = session
 
                 print(f"[SessionManager] Loaded {len(rows)} sessions from database")
@@ -248,11 +268,29 @@ class SessionManager:
                 original_pdf_file_path.write_bytes(session.original_pdf_bytes)
                 original_pdf_file_path = str(original_pdf_file_path)
 
+            # Serialize context_files to JSON
+            context_files_json = None
+            if session.context_files:
+                # Convert ParsedFile objects to dicts if needed
+                context_files_data = []
+                for cf in session.context_files:
+                    if hasattr(cf, 'to_dict'):
+                        context_files_data.append(cf.to_dict())
+                    elif isinstance(cf, dict):
+                        context_files_data.append(cf)
+                    else:
+                        context_files_data.append({
+                            "filename": getattr(cf, 'filename', 'unknown'),
+                            "content": getattr(cf, 'content', ''),
+                            "was_parsed": getattr(cf, 'was_parsed', False)
+                        })
+                context_files_json = json.dumps(context_files_data)
+
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute("""
                     INSERT OR REPLACE INTO sessions
-                    (session_id, pdf_path, output_path, applied_edits, pdf_file_path, original_pdf_file_path, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM sessions WHERE session_id = ?), ?), ?)
+                    (session_id, pdf_path, output_path, applied_edits, pdf_file_path, original_pdf_file_path, context_files, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM sessions WHERE session_id = ?), ?), ?)
                 """, (
                     session.session_id,
                     session.pdf_path,
@@ -260,6 +298,7 @@ class SessionManager:
                     json.dumps(session.applied_edits) if session.applied_edits else None,
                     pdf_file_path,
                     original_pdf_file_path,
+                    context_files_json,
                     session.session_id,  # For the COALESCE subquery
                     time.time(),  # created_at (only used if new)
                     time.time(),  # updated_at
@@ -382,6 +421,13 @@ class SessionManager:
         session = self.get_session(session_id)
         if session and session.original_pdf_bytes:
             return session.original_pdf_bytes
+        return None
+
+    def get_session_context_files(self, session_id: str) -> list | None:
+        """Get the context files for a session (for API retrieval)."""
+        session = self.get_session(session_id)
+        if session and session.context_files:
+            return session.context_files
         return None
 
 
@@ -1040,6 +1086,7 @@ async def run_agent_stream(
     resume_session_id: str | None = None,
     user_session_id: str | None = None,
     original_pdf_bytes: bytes | None = None,
+    context_files: list | None = None,
 ):
     """
     Run the agent and yield messages as they come in (for streaming).
@@ -1056,6 +1103,7 @@ async def run_agent_stream(
         resume_session_id: Session ID from previous turn to resume conversation context
         user_session_id: Unique ID for this user's form-filling session (for concurrent users)
         original_pdf_bytes: The original (unfilled) PDF bytes for first-turn sessions
+        context_files: List of parsed context files (dicts with filename, content, was_parsed)
 
     Yields:
         dict: Serialized message from the agent, including session_id in complete event
@@ -1088,6 +1136,31 @@ async def run_agent_stream(
         if original_pdf_bytes:
             session.original_pdf_bytes = original_pdf_bytes
 
+    # Store context files in session (they persist across turns)
+    if context_files:
+        session.context_files = context_files
+
+    # Build context files section if available
+    context_section = ""
+    all_context_files = session.context_files or []
+    if all_context_files:
+        context_parts = []
+        for cf in all_context_files:
+            filename = cf.get("filename", "unknown") if isinstance(cf, dict) else getattr(cf, "filename", "unknown")
+            content = cf.get("content", "") if isinstance(cf, dict) else getattr(cf, "content", "")
+            # Truncate very long content to avoid exceeding context limits
+            if len(content) > 50000:
+                content = content[:50000] + "\n\n[... content truncated ...]"
+            context_parts.append(f"### {filename}\n{content}")
+        context_section = f"""
+## Reference Documents
+The user has provided the following documents as context for filling out the form. Use information from these documents to fill the form fields accurately.
+
+{chr(10).join(context_parts)}
+
+---
+"""
+
     # Build prompt based on whether this is a continuation
     if is_continuation:
         # Show what's already been filled
@@ -1099,7 +1172,7 @@ async def run_agent_stream(
             edits_summary = "\n".join(edits_list)
 
         prompt = f"""This is a CONTINUATION of a form-filling session.
-
+{context_section}
 PDF Path (already filled): {pdf_path}
 Output Path: {output_path or pdf_path}
 
@@ -1114,7 +1187,7 @@ Do NOT re-fill fields unless the user specifically asks to change them."""
 
     else:
         prompt = f"""Please fill out this PDF form:
-
+{context_section}
 PDF Path: {pdf_path}
 Output Path: {output_path or pdf_path.replace('.pdf', '_filled.pdf')}
 
