@@ -69,9 +69,14 @@ from pdf_processor import detect_form_fields, DetectedField, FieldType
 # Session State (shared between tools)
 # ============================================================================
 
+import threading
+import uuid
+from contextvars import ContextVar
+
 class FormFillingSession:
     """Holds state for a form-filling session."""
-    def __init__(self):
+    def __init__(self, session_id: str | None = None):
+        self.session_id = session_id or str(uuid.uuid4())
         self.doc = None
         self.pdf_path: str | None = None
         self.output_path: str | None = None
@@ -80,6 +85,8 @@ class FormFillingSession:
         self.applied_edits: dict[str, Any] = {}
         # Track the current filled PDF bytes for multi-turn
         self.current_pdf_bytes: bytes | None = None
+        # Track the original (unfilled) PDF bytes for toggling views
+        self.original_pdf_bytes: bytes | None = None
         # Track if this is a continuation
         self.is_continuation: bool = False
 
@@ -94,6 +101,7 @@ class FormFillingSession:
         self.pending_edits = {}
         self.applied_edits = {}
         self.current_pdf_bytes = None
+        self.original_pdf_bytes = None
         self.is_continuation = False
 
     def soft_reset(self):
@@ -102,8 +110,297 @@ class FormFillingSession:
         self.pending_edits = {}
         # Don't clear applied_edits - we want to track cumulative changes
 
-# Global session for tools to access
-_session = FormFillingSession()
+
+import sqlite3
+import time
+from pathlib import Path as PathlibPath
+
+# Database path - stored in backend directory
+_DB_PATH = PathlibPath(__file__).parent / "sessions.db"
+# Directory for storing session PDF files (cheaper than BLOB in SQLite)
+_SESSIONS_DATA_DIR = PathlibPath(__file__).parent / "sessions_data"
+
+
+class SessionManager:
+    """
+    Thread-safe manager for multiple concurrent user sessions with SQLite persistence.
+
+    Sessions are identified by a unique session_id (UUID string).
+    State is persisted to SQLite so sessions survive server restarts.
+
+    Note: PDF document handles (fitz.Document) are NOT persisted - they are
+    re-opened from stored PDF bytes when needed.
+    """
+    def __init__(self, db_path: str | PathlibPath | None = None, data_dir: str | PathlibPath | None = None):
+        self._sessions: dict[str, FormFillingSession] = {}
+        self._lock = threading.Lock()
+        self._db_path = str(db_path or _DB_PATH)
+        self._data_dir = PathlibPath(data_dir or _SESSIONS_DATA_DIR)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+        self._load_sessions_from_db()
+
+    def _init_db(self):
+        """Initialize the SQLite database schema."""
+        with sqlite3.connect(self._db_path) as conn:
+            # Check if we need to migrate from old schema (with pdf_bytes BLOB)
+            cursor = conn.execute("PRAGMA table_info(sessions)")
+            columns = {row[1] for row in cursor.fetchall()}
+
+            if not columns:
+                # Fresh install - create new schema
+                conn.execute("""
+                    CREATE TABLE sessions (
+                        session_id TEXT PRIMARY KEY,
+                        pdf_path TEXT,
+                        output_path TEXT,
+                        applied_edits TEXT,
+                        pdf_file_path TEXT,
+                        original_pdf_file_path TEXT,
+                        created_at REAL,
+                        updated_at REAL
+                    )
+                """)
+            elif 'pdf_bytes' in columns and 'pdf_file_path' not in columns:
+                # Migration: add pdf_file_path column, migrate data, drop pdf_bytes
+                print("[SessionManager] Migrating database schema...")
+                conn.execute("ALTER TABLE sessions ADD COLUMN pdf_file_path TEXT")
+
+                # Migrate existing BLOB data to files
+                cursor = conn.execute("SELECT session_id, pdf_bytes FROM sessions WHERE pdf_bytes IS NOT NULL")
+                for row in cursor.fetchall():
+                    session_id, pdf_bytes = row
+                    if pdf_bytes:
+                        file_path = self._data_dir / f"{session_id}.pdf"
+                        file_path.write_bytes(pdf_bytes)
+                        conn.execute(
+                            "UPDATE sessions SET pdf_file_path = ?, pdf_bytes = NULL WHERE session_id = ?",
+                            (str(file_path), session_id)
+                        )
+                print("[SessionManager] Migration complete")
+
+            # Add original_pdf_file_path column if it doesn't exist
+            if 'original_pdf_file_path' not in columns and columns:
+                try:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN original_pdf_file_path TEXT")
+                    print("[SessionManager] Added original_pdf_file_path column")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
+            conn.commit()
+        print(f"[SessionManager] Database initialized at: {self._db_path}")
+        print(f"[SessionManager] PDF storage directory: {self._data_dir}")
+
+    def _load_sessions_from_db(self):
+        """Load existing sessions from the database on startup."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM sessions")
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    session = FormFillingSession(row['session_id'])
+                    session.pdf_path = row['pdf_path']
+                    session.output_path = row['output_path']
+
+                    # Load filled PDF bytes from file if available
+                    pdf_file_path = row['pdf_file_path'] if 'pdf_file_path' in row.keys() else None
+                    if pdf_file_path:
+                        file_path = PathlibPath(pdf_file_path)
+                        if file_path.exists():
+                            session.current_pdf_bytes = file_path.read_bytes()
+
+                    # Load original PDF bytes from file if available
+                    original_pdf_file_path = row['original_pdf_file_path'] if 'original_pdf_file_path' in row.keys() else None
+                    if original_pdf_file_path:
+                        file_path = PathlibPath(original_pdf_file_path)
+                        if file_path.exists():
+                            session.original_pdf_bytes = file_path.read_bytes()
+
+                    # Parse applied_edits JSON
+                    if row['applied_edits']:
+                        try:
+                            session.applied_edits = json.loads(row['applied_edits'])
+                        except json.JSONDecodeError:
+                            session.applied_edits = {}
+
+                    self._sessions[session.session_id] = session
+
+                print(f"[SessionManager] Loaded {len(rows)} sessions from database")
+        except Exception as e:
+            print(f"[SessionManager] Error loading sessions: {e}")
+
+    def _save_session_to_db(self, session: FormFillingSession):
+        """Save a session to the database (PDF bytes saved to file)."""
+        try:
+            # Save filled PDF bytes to file if present
+            pdf_file_path = None
+            if session.current_pdf_bytes:
+                pdf_file_path = self._data_dir / f"{session.session_id}.pdf"
+                pdf_file_path.write_bytes(session.current_pdf_bytes)
+                pdf_file_path = str(pdf_file_path)
+
+            # Save original PDF bytes to file if present
+            original_pdf_file_path = None
+            if session.original_pdf_bytes:
+                original_pdf_file_path = self._data_dir / f"{session.session_id}_original.pdf"
+                original_pdf_file_path.write_bytes(session.original_pdf_bytes)
+                original_pdf_file_path = str(original_pdf_file_path)
+
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO sessions
+                    (session_id, pdf_path, output_path, applied_edits, pdf_file_path, original_pdf_file_path, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM sessions WHERE session_id = ?), ?), ?)
+                """, (
+                    session.session_id,
+                    session.pdf_path,
+                    session.output_path,
+                    json.dumps(session.applied_edits) if session.applied_edits else None,
+                    pdf_file_path,
+                    original_pdf_file_path,
+                    session.session_id,  # For the COALESCE subquery
+                    time.time(),  # created_at (only used if new)
+                    time.time(),  # updated_at
+                ))
+                conn.commit()
+        except Exception as e:
+            print(f"[SessionManager] Error saving session {session.session_id}: {e}")
+
+    def _delete_session_from_db(self, session_id: str):
+        """Delete a session from the database and its PDF files."""
+        try:
+            # Delete filled PDF file if it exists
+            pdf_file_path = self._data_dir / f"{session_id}.pdf"
+            if pdf_file_path.exists():
+                pdf_file_path.unlink()
+
+            # Delete original PDF file if it exists
+            original_pdf_file_path = self._data_dir / f"{session_id}_original.pdf"
+            if original_pdf_file_path.exists():
+                original_pdf_file_path.unlink()
+
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+                conn.commit()
+        except Exception as e:
+            print(f"[SessionManager] Error deleting session {session_id}: {e}")
+
+    def create_session(self, session_id: str | None = None) -> FormFillingSession:
+        """Create a new session with optional specified ID."""
+        session = FormFillingSession(session_id)
+        with self._lock:
+            self._sessions[session.session_id] = session
+        self._save_session_to_db(session)
+        print(f"[SessionManager] Created session: {session.session_id}")
+        return session
+
+    def get_session(self, session_id: str) -> FormFillingSession | None:
+        """Get an existing session by ID."""
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def get_or_create_session(self, session_id: str | None = None) -> FormFillingSession:
+        """Get existing session or create a new one."""
+        if session_id:
+            with self._lock:
+                if session_id in self._sessions:
+                    print(f"[SessionManager] Retrieved existing session: {session_id}")
+                    return self._sessions[session_id]
+        return self.create_session(session_id)
+
+    def save_session(self, session: FormFillingSession):
+        """Explicitly save session state to database."""
+        self._save_session_to_db(session)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session and clean up resources."""
+        with self._lock:
+            if session_id in self._sessions:
+                session = self._sessions[session_id]
+                session.reset()  # Clean up doc, etc.
+                del self._sessions[session_id]
+                self._delete_session_from_db(session_id)
+                print(f"[SessionManager] Deleted session: {session_id}")
+                return True
+        return False
+
+    def cleanup_old_sessions(self, max_age_seconds: int = 3600):
+        """
+        Clean up sessions older than max_age_seconds.
+        Call this periodically in production to prevent database bloat.
+        """
+        cutoff_time = time.time() - max_age_seconds
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                # Get old session IDs
+                cursor = conn.execute(
+                    "SELECT session_id FROM sessions WHERE updated_at < ?",
+                    (cutoff_time,)
+                )
+                old_sessions = [row[0] for row in cursor.fetchall()]
+
+                # Delete PDF files (both filled and original)
+                for sid in old_sessions:
+                    pdf_file_path = self._data_dir / f"{sid}.pdf"
+                    if pdf_file_path.exists():
+                        pdf_file_path.unlink()
+                    original_pdf_file_path = self._data_dir / f"{sid}_original.pdf"
+                    if original_pdf_file_path.exists():
+                        original_pdf_file_path.unlink()
+
+                # Delete from database
+                conn.execute(
+                    "DELETE FROM sessions WHERE updated_at < ?",
+                    (cutoff_time,)
+                )
+                conn.commit()
+
+                # Remove from memory
+                with self._lock:
+                    for sid in old_sessions:
+                        if sid in self._sessions:
+                            self._sessions[sid].reset()
+                            del self._sessions[sid]
+
+                if old_sessions:
+                    print(f"[SessionManager] Cleaned up {len(old_sessions)} old sessions")
+
+        except Exception as e:
+            print(f"[SessionManager] Error during cleanup: {e}")
+
+    def get_session_pdf_bytes(self, session_id: str) -> bytes | None:
+        """Get the filled PDF bytes for a session (for API retrieval)."""
+        session = self.get_session(session_id)
+        if session and session.current_pdf_bytes:
+            return session.current_pdf_bytes
+        return None
+
+    def get_session_original_pdf_bytes(self, session_id: str) -> bytes | None:
+        """Get the original (unfilled) PDF bytes for a session (for API retrieval)."""
+        session = self.get_session(session_id)
+        if session and session.original_pdf_bytes:
+            return session.original_pdf_bytes
+        return None
+
+
+# Global session manager (replaces the singleton _session)
+_session_manager = SessionManager()
+
+# Context variable to track current session in async context
+# This allows tools to access the session without passing it explicitly
+_current_session: ContextVar[FormFillingSession | None] = ContextVar('current_session', default=None)
+
+
+def get_current_session() -> FormFillingSession | None:
+    """Get the current session from context (used by tools)."""
+    return _current_session.get()
+
+
+def set_current_session(session: FormFillingSession | None):
+    """Set the current session in context."""
+    _current_session.set(session)
 
 
 
@@ -117,26 +414,30 @@ if AGENT_SDK_AVAILABLE:
     @tool("load_pdf", "Load a PDF file for form filling", {"pdf_path": str})
     async def tool_load_pdf(args: dict[str, Any]) -> dict[str, Any]:
         """Load a PDF and detect its form fields."""
+        session = get_current_session()
+        if not session:
+            return {"content": [{"type": "text", "text": '{"error": "No active session"}'}]}
+
         pdf_path = args["pdf_path"]
-        print(f"[load_pdf] Loading: {pdf_path}")
+        print(f"[load_pdf] Loading: {pdf_path} (session: {session.session_id})")
         try:
-            _session.doc = fitz.open(pdf_path)
-            _session.pdf_path = pdf_path
+            session.doc = fitz.open(pdf_path)
+            session.pdf_path = pdf_path
 
             with open(pdf_path, 'rb') as f:
                 pdf_bytes = f.read()
-            _session.fields = detect_form_fields(pdf_bytes)
-            _session.pending_edits = {}
+            session.fields = detect_form_fields(pdf_bytes)
+            session.pending_edits = {}
             # Don't clear applied_edits if this is a continuation
-            if not _session.is_continuation:
-                _session.applied_edits = {}
+            if not session.is_continuation:
+                session.applied_edits = {}
 
             result = {
                 "success": True,
-                "message": f"Loaded PDF with {len(_session.fields)} form fields",
-                "field_count": len(_session.fields)
+                "message": f"Loaded PDF with {len(session.fields)} form fields",
+                "field_count": len(session.fields)
             }
-            print(f"[load_pdf] Success: {len(_session.fields)} fields found")
+            print(f"[load_pdf] Success: {len(session.fields)} fields found")
         except Exception as e:
             result = {"success": False, "error": str(e)}
             print(f"[load_pdf] Error: {e}")
@@ -146,11 +447,12 @@ if AGENT_SDK_AVAILABLE:
     @tool("list_all_fields", "List all form fields in the loaded PDF", {})
     async def tool_list_all_fields(args: dict[str, Any]) -> dict[str, Any]:
         """List all detected form fields."""
-        if not _session.doc:
+        session = get_current_session()
+        if not session or not session.doc:
             return {"content": [{"type": "text", "text": '{"error": "No PDF loaded. Call load_pdf first."}'}]}
 
         fields = []
-        for f in _session.fields:
+        for f in session.fields:
             field_info = {
                 "field_id": f.field_id,
                 "type": f.field_type.value,
@@ -159,8 +461,8 @@ if AGENT_SDK_AVAILABLE:
                 "has_options": f.options is not None,
             }
             # Include current value if the field has been filled
-            if f.field_id in _session.applied_edits:
-                field_info["current_value"] = _session.applied_edits[f.field_id]
+            if f.field_id in session.applied_edits:
+                field_info["current_value"] = session.applied_edits[f.field_id]
             elif f.current_value:
                 field_info["current_value"] = f.current_value
             fields.append(field_info)
@@ -170,13 +472,14 @@ if AGENT_SDK_AVAILABLE:
     @tool("search_fields", "Search for fields matching a query", {"query": str})
     async def tool_search_fields(args: dict[str, Any]) -> dict[str, Any]:
         """Search fields by label context."""
-        if not _session.doc:
+        session = get_current_session()
+        if not session or not session.doc:
             return {"content": [{"type": "text", "text": '{"error": "No PDF loaded."}'}]}
 
         query = args["query"].lower()
         results = []
 
-        for f in _session.fields:
+        for f in session.fields:
             context_lower = f.label_context.lower()
             if query in context_lower or any(word in context_lower for word in query.split()):
                 field_info = {
@@ -187,8 +490,8 @@ if AGENT_SDK_AVAILABLE:
                     "options": f.options,
                 }
                 # Include current value if set
-                if f.field_id in _session.applied_edits:
-                    field_info["current_value"] = _session.applied_edits[f.field_id]
+                if f.field_id in session.applied_edits:
+                    field_info["current_value"] = session.applied_edits[f.field_id]
                 results.append(field_info)
 
         return {"content": [{"type": "text", "text": json.dumps(results[:10], indent=2)}]}
@@ -196,11 +499,12 @@ if AGENT_SDK_AVAILABLE:
     @tool("get_field_details", "Get detailed info about a specific field", {"field_id": str})
     async def tool_get_field_details(args: dict[str, Any]) -> dict[str, Any]:
         """Get full details about a field."""
-        if not _session.doc:
+        session = get_current_session()
+        if not session or not session.doc:
             return {"content": [{"type": "text", "text": '{"error": "No PDF loaded."}'}]}
 
         field_id = args["field_id"]
-        field = next((f for f in _session.fields if f.field_id == field_id), None)
+        field = next((f for f in session.fields if f.field_id == field_id), None)
 
         if not field:
             return {"content": [{"type": "text", "text": f'{{"error": "Field not found: {field_id}"}}'}]}
@@ -211,22 +515,23 @@ if AGENT_SDK_AVAILABLE:
             "page": field.page,
             "label_context": field.label_context,
             "options": field.options,
-            "pending_value": _session.pending_edits.get(field_id),
-            "current_value": _session.applied_edits.get(field_id) or field.current_value,
+            "pending_value": session.pending_edits.get(field_id),
+            "current_value": session.applied_edits.get(field_id) or field.current_value,
         }
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
     @tool("set_field", "Stage a value for a field (call commit_edits to apply)", {"field_id": str, "value": str})
     async def tool_set_field(args: dict[str, Any]) -> dict[str, Any]:
         """Stage a field edit."""
+        session = get_current_session()
         print(f"[set_field] Called with: {args}")
-        if not _session.doc:
+        if not session or not session.doc:
             return {"content": [{"type": "text", "text": '{"error": "No PDF loaded."}'}]}
 
         field_id = args["field_id"]
         value = args["value"]
 
-        field = next((f for f in _session.fields if f.field_id == field_id), None)
+        field = next((f for f in session.fields if f.field_id == field_id), None)
         if not field:
             print(f"[set_field] Field not found: {field_id}")
             return {"content": [{"type": "text", "text": f'{{"error": "Field not found: {field_id}"}}'}]}
@@ -236,23 +541,27 @@ if AGENT_SDK_AVAILABLE:
             if isinstance(value, str):
                 value = value.lower() in ('true', 'yes', '1', 'checked')
 
-        _session.pending_edits[field_id] = value
-        print(f"[set_field] Staged: {field_id} = {value} (total pending: {len(_session.pending_edits)})")
+        session.pending_edits[field_id] = value
+        print(f"[set_field] Staged: {field_id} = {value} (total pending: {len(session.pending_edits)})")
 
         result = {
             "success": True,
             "field_id": field_id,
             "value": value,
-            "pending_count": len(_session.pending_edits)
+            "pending_count": len(session.pending_edits)
         }
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
     @tool("get_pending_edits", "Review all staged edits before committing", {})
     async def tool_get_pending_edits(args: dict[str, Any]) -> dict[str, Any]:
         """Get all pending edits."""
+        session = get_current_session()
+        if not session:
+            return {"content": [{"type": "text", "text": '{"error": "No active session"}'}]}
+
         edits = []
-        for field_id, value in _session.pending_edits.items():
-            field = next((f for f in _session.fields if f.field_id == field_id), None)
+        for field_id, value in session.pending_edits.items():
+            field = next((f for f in session.fields if f.field_id == field_id), None)
             edits.append({
                 "field_id": field_id,
                 "value": value,
@@ -276,30 +585,34 @@ if AGENT_SDK_AVAILABLE:
     )
     async def tool_commit_edits(args: dict[str, Any]) -> dict[str, Any]:
         """Apply edits and save."""
+        session = get_current_session()
         print(f"[commit_edits] Called with args: {args}")
-        print(f"[commit_edits] Session output_path: {_session.output_path}")
-        print(f"[commit_edits] Pending edits: {len(_session.pending_edits)}")
+        if not session:
+            return {"content": [{"type": "text", "text": '{"error": "No active session"}'}]}
 
-        if not _session.doc:
+        print(f"[commit_edits] Session output_path: {session.output_path}")
+        print(f"[commit_edits] Pending edits: {len(session.pending_edits)}")
+
+        if not session.doc:
             return {"content": [{"type": "text", "text": '{"error": "No PDF loaded."}'}]}
 
-        output_path = args.get("output_path") or _session.output_path
+        output_path = args.get("output_path") or session.output_path
         if not output_path:
-            output_path = _session.pdf_path.replace('.pdf', '_filled.pdf')
+            output_path = session.pdf_path.replace('.pdf', '_filled.pdf')
 
         print(f"[commit_edits] Saving to: {output_path}")
 
         applied = []
         errors = []
 
-        for field_id, value in _session.pending_edits.items():
-            field = next((f for f in _session.fields if f.field_id == field_id), None)
+        for field_id, value in session.pending_edits.items():
+            field = next((f for f in session.fields if f.field_id == field_id), None)
             if not field:
                 errors.append(f"Field not found: {field_id}")
                 continue
 
             try:
-                page = _session.doc[field.page]
+                page = session.doc[field.page]
                 for widget in page.widgets():
                     widget_field_id = f"page{field.page}_{widget.field_name}"
                     if widget_field_id == field_id:
@@ -309,7 +622,7 @@ if AGENT_SDK_AVAILABLE:
                             widget.field_value = str(value)
                         widget.update()
                         applied.append({"field_id": field_id, "value": value})
-                        _session.applied_edits[field_id] = value
+                        session.applied_edits[field_id] = value
                         print(f"[commit_edits] Applied: {field_id} = {value}")
                         break
             except Exception as e:
@@ -318,12 +631,12 @@ if AGENT_SDK_AVAILABLE:
 
         # Save
         try:
-            _session.doc.save(output_path)
+            session.doc.save(output_path)
             print(f"[commit_edits] Saved successfully to: {output_path}")
 
             # Store the filled PDF bytes for multi-turn
             with open(output_path, 'rb') as f:
-                _session.current_pdf_bytes = f.read()
+                session.current_pdf_bytes = f.read()
 
             # Verify file was created
             import os
@@ -337,13 +650,13 @@ if AGENT_SDK_AVAILABLE:
             print(f"[commit_edits] Save error: {e}")
             errors.append(f"Save failed: {str(e)}")
 
-        _session.pending_edits.clear()
+        session.pending_edits.clear()
 
         result = {
             "success": len(errors) == 0,
             "applied": applied,
             "applied_count": len(applied),
-            "total_fields_filled": len(_session.applied_edits),
+            "total_fields_filled": len(session.applied_edits),
             "errors": errors,
             "output_path": output_path
         }
@@ -439,6 +752,7 @@ CONTINUATION_SYSTEM_PROMPT = """You are a form-filling agent continuing a multi-
 
 
 def _create_agent_options(
+    session: FormFillingSession,
     output_path: str | None = None,
     is_continuation: bool = False,
     resume_session_id: str | None = None,
@@ -447,13 +761,14 @@ def _create_agent_options(
     Create agent options with form-filling tools.
 
     Args:
+        session: The FormFillingSession for this request
         output_path: Where to save the filled PDF
         is_continuation: Whether this is a follow-up message in a conversation
         resume_session_id: Session ID from previous turn to resume conversation context
     """
     # Store output path in session for tools to access
-    _session.output_path = output_path
-    _session.is_continuation = is_continuation
+    session.output_path = output_path
+    session.is_continuation = is_continuation
 
     # Create in-process MCP server with our tools
     form_server = create_sdk_mcp_server(
@@ -593,10 +908,11 @@ def _get_friendly_tool_description(tool_name: str, tool_input: dict) -> str:
 
 def _get_field_label(field_id: str) -> str:
     """Get a user-friendly label for a field from the session."""
-    if not _session.fields:
+    session = get_current_session()
+    if not session or not session.fields:
         return None
 
-    field = next((f for f in _session.fields if f.field_id == field_id), None)
+    field = next((f for f in session.fields if f.field_id == field_id), None)
     if not field:
         return None
 
@@ -722,6 +1038,8 @@ async def run_agent_stream(
     is_continuation: bool = False,
     previous_edits: dict[str, Any] | None = None,
     resume_session_id: str | None = None,
+    user_session_id: str | None = None,
+    original_pdf_bytes: bytes | None = None,
 ):
     """
     Run the agent and yield messages as they come in (for streaming).
@@ -736,11 +1054,13 @@ async def run_agent_stream(
         is_continuation: Whether this is a continuation of a previous session
         previous_edits: Dict of field_id -> value from previous turns (for context)
         resume_session_id: Session ID from previous turn to resume conversation context
+        user_session_id: Unique ID for this user's form-filling session (for concurrent users)
+        original_pdf_bytes: The original (unfilled) PDF bytes for first-turn sessions
 
     Yields:
         dict: Serialized message from the agent, including session_id in complete event
     """
-    print(f"[Agent Stream] Starting with pdf_path={pdf_path}, is_continuation={is_continuation}, resume_session_id={resume_session_id}")
+    print(f"[Agent Stream] Starting with pdf_path={pdf_path}, is_continuation={is_continuation}, resume_session_id={resume_session_id}, user_session_id={user_session_id}")
 
     if not AGENT_SDK_AVAILABLE:
         print(f"[Agent Stream] SDK not available: {AGENT_SDK_ERROR}")
@@ -751,14 +1071,22 @@ async def run_agent_stream(
     if output_path:
         output_path = str(Path(output_path).resolve())
 
+    # Get or create a session for this user
+    session = _session_manager.get_or_create_session(user_session_id)
+    # Set it as the current session in context for tools to access
+    set_current_session(session)
+
     # Reset session appropriately
     if is_continuation:
-        _session.soft_reset()
+        session.soft_reset()
         # Restore previous edits for context
         if previous_edits:
-            _session.applied_edits = dict(previous_edits)
+            session.applied_edits = dict(previous_edits)
     else:
-        _session.reset()
+        session.reset()
+        # Store the original PDF bytes for new sessions
+        if original_pdf_bytes:
+            session.original_pdf_bytes = original_pdf_bytes
 
     # Build prompt based on whether this is a continuation
     if is_continuation:
@@ -797,7 +1125,7 @@ Start by loading the PDF, then list the fields, fill them according to the instr
     print(f"[Agent Stream] Creating ClaudeSDKClient...")
     yield {"type": "status", "message": "Connecting to Claude Agent SDK..."}
 
-    options = _create_agent_options(output_path, is_continuation, resume_session_id)
+    options = _create_agent_options(session, output_path, is_continuation, resume_session_id)
     message_count = 0
     result_text = ""
     agent_session_id = None  # Will be extracted from ResultMessage
@@ -846,15 +1174,19 @@ Start by loading the PDF, then list the fields, fill them according to the instr
         traceback.print_exc()
         yield {"type": "error", "error": f"Agent error: {str(e)}"}
 
+    # Save session state to database for persistence across server restarts
+    _session_manager.save_session(session)
+
     # Yield final summary with applied edits and session_id for multi-turn tracking
     yield {
         "type": "complete",
         "success": True,
         "result": result_text,
         "message_count": message_count,
-        "applied_count": len(_session.applied_edits),
-        "applied_edits": dict(_session.applied_edits),
+        "applied_count": len(session.applied_edits),
+        "applied_edits": dict(session.applied_edits),
         "session_id": agent_session_id,  # Return session_id for frontend to use in next turn
+        "user_session_id": session.session_id,  # Return the user session ID for concurrent user tracking
     }
 
 
@@ -864,6 +1196,7 @@ async def run_agent(
     output_path: str | None = None,
     is_continuation: bool = False,
     previous_edits: dict[str, Any] | None = None,
+    user_session_id: str | None = None,
 ) -> dict:
     """
     Run the form-filling agent using ClaudeSDKClient.
@@ -874,6 +1207,7 @@ async def run_agent(
         output_path: Optional path for the filled PDF
         is_continuation: Whether this is a continuation of a previous session
         previous_edits: Dict of field_id -> value from previous turns
+        user_session_id: Unique ID for this user's form-filling session (for concurrent users)
 
     Returns:
         Summary of the agent execution
@@ -885,13 +1219,18 @@ async def run_agent(
     if output_path:
         output_path = str(Path(output_path).resolve())
 
+    # Get or create a session for this user
+    session = _session_manager.get_or_create_session(user_session_id)
+    # Set it as the current session in context for tools to access
+    set_current_session(session)
+
     # Reset session appropriately
     if is_continuation:
-        _session.soft_reset()
+        session.soft_reset()
         if previous_edits:
-            _session.applied_edits = dict(previous_edits)
+            session.applied_edits = dict(previous_edits)
     else:
-        _session.reset()
+        session.reset()
 
     if is_continuation:
         prompt = f"""This is a CONTINUATION of a form-filling session.
@@ -912,7 +1251,7 @@ Instructions: {instructions}
 
 Start by loading the PDF, then list the fields, fill them according to the instructions, and commit the edits."""
 
-    options = _create_agent_options(output_path, is_continuation)
+    options = _create_agent_options(session, output_path, is_continuation)
     messages = []
     result_text = ""
 
@@ -928,12 +1267,16 @@ Start by loading the PDF, then list the fields, fill them according to the instr
                         result_text = block.text
                         print(f"  Agent: {result_text[:100]}...")
 
+    # Save session state to database for persistence across server restarts
+    _session_manager.save_session(session)
+
     return {
         "success": True,
         "result": result_text,
         "message_count": len(messages),
-        "applied_count": len(_session.applied_edits),
-        "applied_edits": dict(_session.applied_edits),
+        "applied_count": len(session.applied_edits),
+        "applied_edits": dict(session.applied_edits),
+        "user_session_id": session.session_id,
     }
 
 

@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from pdf_processor import detect_form_fields, edit_pdf_with_instructions, get_form_summary
 from llm import map_instructions_to_fields
-from agent import run_agent, run_agent_stream, AGENT_SDK_AVAILABLE, AGENT_SDK_ERROR
+from agent import run_agent, run_agent_stream, AGENT_SDK_AVAILABLE, AGENT_SDK_ERROR, _session_manager
 
 
 # ============================================================================
@@ -40,6 +40,27 @@ app = FastAPI(
     description="Fill PDF forms using natural language instructions",
     version="0.1.0"
 )
+
+
+# Background task to cleanup old sessions periodically
+import asyncio
+
+async def periodic_session_cleanup():
+    """Run session cleanup every hour."""
+    while True:
+        await asyncio.sleep(3600)  # 1 hour
+        try:
+            # Clean up sessions older than 24 hours
+            _session_manager.cleanup_old_sessions(max_age_seconds=86400)
+        except Exception as e:
+            print(f"[Cleanup] Error during periodic cleanup: {e}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on app startup."""
+    asyncio.create_task(periodic_session_cleanup())
+    print("[App] Started periodic session cleanup task (every 1 hour, cleaning sessions older than 24 hours)")
 
 # Allow CORS for local development
 app.add_middleware(
@@ -426,6 +447,7 @@ async def fill_pdf_agent_stream(
     is_continuation: bool = Form(False),
     previous_edits: Optional[str] = Form(None),  # JSON string of field_id -> value
     resume_session_id: Optional[str] = Form(None),  # Session ID from previous turn
+    user_session_id: Optional[str] = Form(None),  # Unique ID for this user's form-filling session
 ):
     """
     Fill a PDF form using agent mode with real-time streaming.
@@ -438,6 +460,7 @@ async def fill_pdf_agent_stream(
         is_continuation: Set to true for multi-turn conversations (subsequent messages)
         previous_edits: JSON string of {field_id: value} from previous turns
         resume_session_id: Session ID from previous turn to resume conversation context
+        user_session_id: Unique ID for this user's form-filling session (for concurrent users)
 
     Event types:
     - init: Session initialized with field count
@@ -445,7 +468,7 @@ async def fill_pdf_agent_stream(
     - text: Agent thinking/response text
     - tool_start: Tool call started
     - tool_end: Tool call completed with result
-    - complete: Agent finished (includes applied_edits and session_id for tracking)
+    - complete: Agent finished (includes applied_edits, session_id, and user_session_id for tracking)
     - pdf_ready: Final summary with filled PDF (hex-encoded)
     - error: Error occurred
     """
@@ -497,6 +520,7 @@ async def fill_pdf_agent_stream(
             yield f"data: {json.dumps({'type': 'status', 'message': f'PDF saved, starting Claude Agent SDK...'})}\n\n"
 
             # Stream messages from Claude Agent SDK with continuation params
+            # Pass original PDF bytes only for new sessions (not continuations)
             message_count = 0
             async for message in run_agent_stream(
                 tmp_path,
@@ -505,6 +529,8 @@ async def fill_pdf_agent_stream(
                 is_continuation=is_continuation,
                 previous_edits=parsed_previous_edits,
                 resume_session_id=resume_session_id,
+                user_session_id=user_session_id,
+                original_pdf_bytes=pdf_bytes if not is_continuation else None,
             ):
                 message_count += 1
                 # Convert message to JSON and send as SSE
@@ -572,6 +598,72 @@ if FRONTEND_DIR.exists():
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# ============================================================================
+# Session PDF Retrieval
+# ============================================================================
+
+@app.get("/session/{session_id}/pdf")
+async def get_session_pdf(session_id: str):
+    """
+    Retrieve the filled PDF for a session.
+
+    This allows the frontend to restore the PDF when a user returns to a session.
+    Returns the PDF bytes as a file response.
+    """
+    pdf_bytes = _session_manager.get_session_pdf_bytes(session_id)
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="Session not found or no PDF available")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=session_{session_id}.pdf"
+        }
+    )
+
+
+@app.get("/session/{session_id}/original-pdf")
+async def get_session_original_pdf(session_id: str):
+    """
+    Retrieve the original (unfilled) PDF for a session.
+
+    This allows the frontend to show both original and filled views when restoring a session.
+    Returns the PDF bytes as a file response.
+    """
+    pdf_bytes = _session_manager.get_session_original_pdf_bytes(session_id)
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="Session not found or no original PDF available")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=session_{session_id}_original.pdf"
+        }
+    )
+
+
+@app.get("/session/{session_id}")
+async def get_session_info(session_id: str):
+    """
+    Get session metadata (without PDF bytes).
+
+    Returns applied edits and whether PDFs are available.
+    """
+    session = _session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session_id": session.session_id,
+        "has_pdf": session.current_pdf_bytes is not None,
+        "has_original_pdf": session.original_pdf_bytes is not None,
+        "applied_edits": session.applied_edits,
+        "field_count": len(session.applied_edits) if session.applied_edits else 0,
+    }
 
 
 # ============================================================================

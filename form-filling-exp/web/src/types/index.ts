@@ -54,6 +54,7 @@ export interface StreamEvent {
   applied_count?: number;
   applied_edits?: Record<string, unknown>;  // All edits applied so far (for multi-turn tracking)
   session_id?: string;  // Agent session ID for resuming conversations
+  user_session_id?: string;  // User's form-filling session ID (for concurrent user support)
   pdf_bytes?: string;
 }
 

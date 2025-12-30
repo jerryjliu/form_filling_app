@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { ChatMessage, FormField, PdfDisplayMode, StreamEvent, AgentLogEntry } from '@/types';
-import { analyzePdf, streamAgentFill, hexToBytes } from '@/lib/api';
+import { analyzePdf, streamAgentFill, hexToBytes, getSessionPdf, getSessionOriginalPdf } from '@/lib/api';
 import {
   createSession,
   createMessage,
@@ -22,6 +22,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [fields, setFields] = useState<FormField[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [originalPdfBytes, setOriginalPdfBytes] = useState<Uint8Array | null>(null);  // For restored sessions
   const [filledPdfBytes, setFilledPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDisplayMode, setPdfDisplayMode] = useState<PdfDisplayMode>('original');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -31,6 +32,8 @@ export default function Home() {
   const [appliedEdits, setAppliedEdits] = useState<Record<string, unknown> | null>(null);
   // Track agent session ID for resuming conversations (Claude SDK session)
   const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
+  // Track user session ID for backend state isolation (concurrent user support)
+  const [userSessionId, setUserSessionId] = useState<string | null>(null);
 
   // Initialize session from URL or create new one
   useEffect(() => {
@@ -39,10 +42,40 @@ export default function Home() {
     if (urlSessionId) {
       // Try to load existing session
       const stored = loadSessionFromStorage(urlSessionId);
+      console.log('[DEBUG] Loading session from storage:', {
+        urlSessionId,
+        stored: stored ? { hasFields: stored.fields?.length, hasMessages: stored.messages?.length, userSessionId: stored.userSessionId } : null,
+      });
       if (stored) {
         setSessionId(urlSessionId);
         setFields(stored.fields || []);
         setMessages(stored.messages || []);
+
+        // If we have a userSessionId, try to fetch both PDFs from backend
+        if (stored.userSessionId) {
+          console.log('[DEBUG] Fetching PDFs from backend for userSessionId:', stored.userSessionId);
+          setUserSessionId(stored.userSessionId);
+
+          // Fetch both original and filled PDFs in parallel
+          Promise.all([
+            getSessionPdf(stored.userSessionId),
+            getSessionOriginalPdf(stored.userSessionId),
+          ]).then(([filledBytes, originalBytes]) => {
+            console.log('[DEBUG] PDF fetch results:', {
+              hasFilledBytes: !!filledBytes,
+              filledSize: filledBytes?.length,
+              hasOriginalBytes: !!originalBytes,
+              originalSize: originalBytes?.length,
+            });
+            if (filledBytes) {
+              setFilledPdfBytes(filledBytes);
+              setPdfDisplayMode('filled');
+            }
+            if (originalBytes) {
+              setOriginalPdfBytes(originalBytes);
+            }
+          });
+        }
       } else {
         // Session not found, create new one
         const session = createSession();
@@ -60,34 +93,41 @@ export default function Home() {
   // Save session to storage when it changes
   useEffect(() => {
     if (sessionId) {
-      saveSessionToStorage({
-        id: sessionId,
-        originalPdf: file,
-        filledPdfBytes,
-        fields,
-        messages,
-        isProcessing,
-      });
+      saveSessionToStorage(
+        {
+          id: sessionId,
+          originalPdf: file,
+          filledPdfBytes,
+          fields,
+          messages,
+          isProcessing,
+        },
+        userSessionId
+      );
     }
-  }, [sessionId, fields, messages, file, filledPdfBytes, isProcessing]);
+  }, [sessionId, fields, messages, file, filledPdfBytes, isProcessing, userSessionId]);
 
   // Handle file selection and analysis
   const handleFileSelect = useCallback(async (selectedFile: File | null) => {
     if (!selectedFile) {
       setFile(null);
       setFields([]);
+      setOriginalPdfBytes(null);  // Clear restored original PDF
       setFilledPdfBytes(null);
       setPdfDisplayMode('original');
       setAppliedEdits(null);  // Clear edits when resetting
       setAgentSessionId(null);  // Clear agent session when resetting
+      setUserSessionId(null);  // Clear user session when resetting
       return;
     }
 
     setFile(selectedFile);
+    setOriginalPdfBytes(null);  // Clear restored original PDF for new file
     setFilledPdfBytes(null);
     setPdfDisplayMode('original');
     setAppliedEdits(null);  // Clear edits for new file
     setAgentSessionId(null);  // Clear agent session for new file
+    setUserSessionId(null);  // Clear user session for new file
     setIsAnalyzing(true);
 
     try {
@@ -149,6 +189,8 @@ export default function Home() {
       let appliedCount = 0;
       let newAppliedEdits: Record<string, unknown> | null = null;
       let newAgentSessionId: string | null = null;
+      let newUserSessionId: string | null = null;
+      let newFilledPdfBytes: Uint8Array | null = null;
 
       try {
         for await (const event of streamAgentFill({
@@ -158,6 +200,7 @@ export default function Home() {
           isContinuation,
           previousEdits: appliedEdits,
           resumeSessionId: agentSessionId,
+          userSessionId: userSessionId,
         })) {
           const logEntry = createLogEntry(event);
 
@@ -192,6 +235,10 @@ export default function Home() {
             if (event.session_id) {
               newAgentSessionId = event.session_id;
             }
+            // Track user session ID for backend state isolation
+            if (event.user_session_id) {
+              newUserSessionId = event.user_session_id;
+            }
             const totalEdits = newAppliedEdits ? Object.keys(newAppliedEdits).length : appliedCount;
             if (isContinuation) {
               finalContent = `Updated ${appliedCount} fields. Total: ${totalEdits} fields filled.`;
@@ -202,6 +249,7 @@ export default function Home() {
 
           if (event.type === 'pdf_ready' && event.pdf_bytes) {
             const bytes = hexToBytes(event.pdf_bytes);
+            newFilledPdfBytes = bytes;
             setFilledPdfBytes(bytes);
             setPdfDisplayMode('filled');
           }
@@ -219,6 +267,30 @@ export default function Home() {
         // Update agent session ID for multi-turn conversations
         if (newAgentSessionId) {
           setAgentSessionId(newAgentSessionId);
+        }
+
+        // Update user session ID for backend state isolation
+        // IMPORTANT: Save to localStorage immediately to ensure it persists even if the tab is closed quickly
+        if (newUserSessionId) {
+          console.log('[DEBUG] Saving userSessionId to localStorage:', {
+            sessionId,
+            newUserSessionId,
+            hasFields: fields.length,
+          });
+          setUserSessionId(newUserSessionId);
+          // Immediate save to localStorage to prevent data loss on quick tab close
+          // Use newFilledPdfBytes since state updates are async
+          saveSessionToStorage(
+            {
+              id: sessionId,
+              originalPdf: file,
+              filledPdfBytes: newFilledPdfBytes || filledPdfBytes,
+              fields,
+              messages,
+              isProcessing: false,
+            },
+            newUserSessionId
+          );
         }
 
         // Mark assistant message as complete
@@ -262,7 +334,7 @@ export default function Home() {
         setStatusMessage('');
       }
     },
-    [file, filledPdfBytes, appliedEdits, agentSessionId]
+    [file, filledPdfBytes, appliedEdits, agentSessionId, userSessionId, sessionId, fields, messages]
   );
 
   return (
@@ -305,6 +377,7 @@ export default function Home() {
             file={file}
             onFileSelect={handleFileSelect}
             fields={fields}
+            originalPdfBytes={originalPdfBytes}
             filledPdfBytes={filledPdfBytes}
             pdfDisplayMode={pdfDisplayMode}
             onPdfDisplayModeChange={setPdfDisplayMode}

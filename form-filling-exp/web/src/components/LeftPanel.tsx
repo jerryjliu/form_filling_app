@@ -9,6 +9,7 @@ interface LeftPanelProps {
   file: File | null;
   onFileSelect: (file: File | null) => void;
   fields: FormField[];
+  originalPdfBytes: Uint8Array | null;  // For restored sessions
   filledPdfBytes: Uint8Array | null;
   pdfDisplayMode: PdfDisplayMode;
   onPdfDisplayModeChange: (mode: PdfDisplayMode) => void;
@@ -20,6 +21,7 @@ export default function LeftPanel({
   file,
   onFileSelect,
   fields,
+  originalPdfBytes,
   filledPdfBytes,
   pdfDisplayMode,
   onPdfDisplayModeChange,
@@ -58,8 +60,8 @@ export default function LeftPanel({
 
       {/* Content */}
       <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
-        {/* Upload section - only show when no file is selected */}
-        {!file && (
+        {/* Upload section - only show when no file is selected AND no restored PDF bytes */}
+        {!file && !originalPdfBytes && !filledPdfBytes && (
           <div className="flex-1 flex items-center justify-center">
             <div className="w-full max-w-md">
               <PdfUpload
@@ -81,10 +83,11 @@ export default function LeftPanel({
           </div>
         )}
 
-        {/* PDF Viewer - takes full space when file is present */}
-        {file && !isAnalyzing && (
+        {/* PDF Viewer - takes full space when file is present OR we have restored PDF bytes */}
+        {(file || originalPdfBytes || filledPdfBytes) && !isAnalyzing && (
           <PdfViewer
             originalFile={file}
+            originalPdfBytes={originalPdfBytes}
             filledPdfBytes={filledPdfBytes}
             mode={pdfDisplayMode}
             onModeChange={onPdfDisplayModeChange}

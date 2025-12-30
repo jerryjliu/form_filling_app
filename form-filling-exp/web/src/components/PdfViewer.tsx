@@ -6,6 +6,7 @@ import { createPdfUrl, downloadPdf } from '@/lib/api';
 
 interface PdfViewerProps {
   originalFile: File | null;
+  originalPdfBytes: Uint8Array | null;  // For restored sessions
   filledPdfBytes: Uint8Array | null;
   mode: PdfDisplayMode;
   onModeChange: (mode: PdfDisplayMode) => void;
@@ -13,6 +14,7 @@ interface PdfViewerProps {
 
 export default function PdfViewer({
   originalFile,
+  originalPdfBytes,
   filledPdfBytes,
   mode,
   onModeChange,
@@ -22,14 +24,19 @@ export default function PdfViewer({
 
   // Create object URLs for PDFs
   useEffect(() => {
+    // Prefer File if available, otherwise use restored bytes
     if (originalFile) {
       const url = URL.createObjectURL(originalFile);
+      setOriginalUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else if (originalPdfBytes) {
+      const url = createPdfUrl(originalPdfBytes);
       setOriginalUrl(url);
       return () => URL.revokeObjectURL(url);
     } else {
       setOriginalUrl(null);
     }
-  }, [originalFile]);
+  }, [originalFile, originalPdfBytes]);
 
   useEffect(() => {
     if (filledPdfBytes) {
@@ -41,17 +48,28 @@ export default function PdfViewer({
     }
   }, [filledPdfBytes]);
 
-  const currentUrl = mode === 'filled' && filledUrl ? filledUrl : originalUrl;
   const hasFilledPdf = filledPdfBytes !== null;
+  const hasOriginalPdf = originalFile !== null || originalPdfBytes !== null;
+
+  // Determine which URL to show:
+  // - If mode is 'filled' and we have filledUrl, show that
+  // - Otherwise show originalUrl if available
+  // - If no originalUrl but we have filledUrl (restored session), show filledUrl
+  const currentUrl = mode === 'filled' && filledUrl
+    ? filledUrl
+    : (originalUrl || filledUrl);
 
   const handleDownload = () => {
-    if (filledPdfBytes && originalFile) {
-      const filename = originalFile.name.replace('.pdf', '_filled.pdf');
+    if (filledPdfBytes) {
+      const filename = originalFile
+        ? originalFile.name.replace('.pdf', '_filled.pdf')
+        : 'filled_form.pdf';
       downloadPdf(filledPdfBytes, filename);
     }
   };
 
-  if (!originalFile) {
+  // Only show empty state if we have neither original nor filled PDF
+  if (!originalFile && !originalPdfBytes && !filledPdfBytes) {
     return (
       <div className="flex-1 flex items-center justify-center bg-background-secondary rounded-lg border border-border">
         <div className="text-center text-foreground-muted">
@@ -69,34 +87,43 @@ export default function PdfViewer({
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-background-tertiary">
         <div className="flex items-center gap-2">
-          {/* Toggle buttons */}
-          <div className="flex rounded-lg bg-background-secondary p-0.5">
-            <button
-              onClick={() => onModeChange('original')}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                mode === 'original'
-                  ? 'bg-accent text-white'
-                  : 'text-foreground-muted hover:text-foreground-secondary'
-              }`}
-            >
-              Original
-            </button>
-            <button
-              onClick={() => hasFilledPdf && onModeChange('filled')}
-              disabled={!hasFilledPdf}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                mode === 'filled'
-                  ? 'bg-accent text-white'
-                  : hasFilledPdf
-                  ? 'text-foreground-muted hover:text-foreground-secondary'
-                  : 'text-foreground-muted/50 cursor-not-allowed'
-              }`}
-            >
-              Filled
-            </button>
-          </div>
+          {/* Toggle buttons - only show if we have both original and filled */}
+          {hasOriginalPdf && hasFilledPdf && (
+            <div className="flex rounded-lg bg-background-secondary p-0.5">
+              <button
+                onClick={() => onModeChange('original')}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                  mode === 'original'
+                    ? 'bg-accent text-white'
+                    : 'text-foreground-muted hover:text-foreground-secondary'
+                }`}
+              >
+                Original
+              </button>
+              <button
+                onClick={() => onModeChange('filled')}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                  mode === 'filled'
+                    ? 'bg-accent text-white'
+                    : 'text-foreground-muted hover:text-foreground-secondary'
+                }`}
+              >
+                Filled
+              </button>
+            </div>
+          )}
 
-          {mode === 'filled' && hasFilledPdf && (
+          {/* Show label when we only have filled PDF (restored session) */}
+          {!hasOriginalPdf && hasFilledPdf && (
+            <span className="flex items-center gap-1 text-xs text-foreground-muted">
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
+              </svg>
+              Restored session
+            </span>
+          )}
+
+          {mode === 'filled' && hasFilledPdf && hasOriginalPdf && (
             <span className="flex items-center gap-1 text-xs text-success">
               <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
