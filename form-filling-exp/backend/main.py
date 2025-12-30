@@ -5,10 +5,15 @@ This is the main entry point. Run with:
     uvicorn main:app --reload
 
 Endpoints:
-    POST /analyze      - Upload PDF, get detected form fields
-    POST /fill         - Fill form fields (single-shot LLM mode)
-    POST /fill-agent   - Fill form fields (agent mode with tools)
-    GET  /             - Serve the web UI
+    POST /analyze            - Upload PDF, get detected form fields
+    POST /fill-agent         - Fill form fields (agent mode with tools) [RECOMMENDED]
+    POST /fill-agent-stream  - Fill form fields with real-time streaming [RECOMMENDED]
+    POST /fill               - Fill form fields (single-shot LLM mode) [LEGACY]
+    GET  /                   - Serve the web UI
+
+Note: The agent mode endpoints are recommended for production use. They provide
+better accuracy, error recovery, and support for multi-turn conversations.
+The single-shot /fill endpoint is maintained for backwards compatibility.
 """
 
 import os
@@ -125,23 +130,25 @@ async def analyze_pdf(file: UploadFile = File(...)):
     )
 
 
-@app.post("/fill")
+@app.post("/fill", deprecated=True)
 async def fill_pdf(
     file: UploadFile = File(...),
     instructions: str = Form(...),
-    use_llm: bool = Form(True)
 ):
     """
-    Fill a PDF form using natural language instructions.
-    
+    [LEGACY] Fill a PDF form using single-shot LLM mode.
+
+    **DEPRECATED**: Use /fill-agent-stream for better accuracy and multi-turn support.
+
+    This endpoint uses a single LLM call to map instructions to form fields.
+    For complex forms or iterative refinement, use the agent endpoints instead.
+
     Args:
         file: The PDF file to fill
         instructions: Natural language description of what to fill
-            e.g., "My name is John Doe, I live at 123 Main St, 
+            e.g., "My name is John Doe, I live at 123 Main St,
                    my phone is 555-1234, and I agree to the terms"
-        use_llm: Whether to use LLM for mapping (default True)
-                 Set to False to use simple keyword matching
-    
+
     Returns:
         The filled PDF file as a download
     """
@@ -163,18 +170,15 @@ async def fill_pdf(
             "This endpoint only works with PDFs that have native AcroForm fields."
         )
     
-    # Step 2: Map instructions to fields
+    # Step 2: Map instructions to fields using LLM
+    # Note: The simple keyword mapping (use_llm=False) is no longer supported.
+    # Use the agent endpoints for better accuracy.
     try:
-        if use_llm:
-            edits = map_instructions_to_fields(instructions, fields)
-        else:
-            from llm import simple_keyword_mapping
-            edits = simple_keyword_mapping(instructions, fields)
+        edits = map_instructions_to_fields(instructions, fields)
     except ValueError as e:
-        # LLM API key not set
         raise HTTPException(
             500,
-            f"LLM error: {str(e)}. Set use_llm=false to use simple keyword matching."
+            f"LLM error: {str(e)}. Make sure ANTHROPIC_API_KEY is set."
         )
     except Exception as e:
         raise HTTPException(500, f"Failed to process instructions: {str(e)}")
@@ -205,28 +209,29 @@ async def fill_pdf(
     )
 
 
-@app.post("/fill-preview")
+@app.post("/fill-preview", deprecated=True)
 async def fill_pdf_preview(
     file: UploadFile = File(...),
     instructions: str = Form(...),
-    use_llm: bool = Form(True)
 ):
     """
-    Preview what fields would be filled without actually filling them.
-    
-    Useful for debugging and understanding how instructions are mapped.
+    [LEGACY] Preview what fields would be filled without actually filling them.
+
+    **DEPRECATED**: Use /fill-agent-stream for better accuracy.
+
+    Useful for debugging and understanding how instructions are mapped in single-shot mode.
     """
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(400, "File must be a PDF")
-    
+
     pdf_bytes = await file.read()
-    
+
     # Detect fields
     try:
         fields = detect_form_fields(pdf_bytes)
     except Exception as e:
         raise HTTPException(500, f"Failed to analyze PDF: {str(e)}")
-    
+
     if not fields:
         return {
             "success": False,
@@ -234,14 +239,10 @@ async def fill_pdf_preview(
             "fields": [],
             "edits": []
         }
-    
-    # Map instructions
+
+    # Map instructions using LLM
     try:
-        if use_llm:
-            edits = map_instructions_to_fields(instructions, fields)
-        else:
-            from llm import simple_keyword_mapping
-            edits = simple_keyword_mapping(instructions, fields)
+        edits = map_instructions_to_fields(instructions, fields)
     except ValueError as e:
         raise HTTPException(500, f"LLM error: {str(e)}")
     
@@ -422,20 +423,30 @@ async def fill_pdf_agent_stream(
     file: UploadFile = File(...),
     instructions: str = Form(...),
     max_iterations: int = Form(20),
+    is_continuation: bool = Form(False),
+    previous_edits: Optional[str] = Form(None),  # JSON string of field_id -> value
+    resume_session_id: Optional[str] = Form(None),  # Session ID from previous turn
 ):
     """
     Fill a PDF form using agent mode with real-time streaming.
-    
+
     Returns Server-Sent Events (SSE) stream with agent messages.
-    
+
+    Args:
+        file: The PDF file to fill. For continuations, this should be the already-filled PDF.
+        instructions: Natural language instructions for this turn
+        is_continuation: Set to true for multi-turn conversations (subsequent messages)
+        previous_edits: JSON string of {field_id: value} from previous turns
+        resume_session_id: Session ID from previous turn to resume conversation context
+
     Event types:
     - init: Session initialized with field count
     - iteration: New iteration started
     - text: Agent thinking/response text
     - tool_start: Tool call started
     - tool_end: Tool call completed with result
-    - complete: Agent finished
-    - summary: Final summary with filled PDF (hex-encoded)
+    - complete: Agent finished (includes applied_edits and session_id for tracking)
+    - pdf_ready: Final summary with filled PDF (hex-encoded)
     - error: Error occurred
     """
     if not file.filename.lower().endswith('.pdf'):
@@ -457,28 +468,44 @@ async def fill_pdf_agent_stream(
     
     pdf_bytes = await file.read()
     
+    # Parse previous_edits JSON if provided
+    parsed_previous_edits = None
+    if previous_edits:
+        try:
+            parsed_previous_edits = json.loads(previous_edits)
+        except json.JSONDecodeError:
+            parsed_previous_edits = None
+
     async def event_stream():
         import tempfile
         import os as os_module
-        
+
         tmp_path = None
         output_path = None
-        
+
         # Send immediate acknowledgment
-        yield f"data: {json.dumps({'type': 'init', 'message': 'Stream connected, initializing agent...'})}\n\n"
-        
+        cont_msg = " (continuation)" if is_continuation else ""
+        yield f"data: {json.dumps({'type': 'init', 'message': f'Stream connected, initializing agent{cont_msg}...'})}\n\n"
+
         try:
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
                 tmp.write(pdf_bytes)
                 tmp_path = tmp.name
-            
+
             output_path = tmp_path.replace('.pdf', '_filled.pdf')
-            
+
             yield f"data: {json.dumps({'type': 'status', 'message': f'PDF saved, starting Claude Agent SDK...'})}\n\n"
-            
-            # Stream messages from Claude Agent SDK
+
+            # Stream messages from Claude Agent SDK with continuation params
             message_count = 0
-            async for message in run_agent_stream(tmp_path, instructions, output_path):
+            async for message in run_agent_stream(
+                tmp_path,
+                instructions,
+                output_path,
+                is_continuation=is_continuation,
+                previous_edits=parsed_previous_edits,
+                resume_session_id=resume_session_id,
+            ):
                 message_count += 1
                 # Convert message to JSON and send as SSE
                 yield f"data: {json.dumps(message, default=str)}\n\n"
@@ -553,22 +580,24 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     print("\n" + "="*60)
     print("PDF Form Filler Server")
     print("="*60)
-    print("\nEndpoints:")
+    print("\nRecommended Endpoints:")
     print("  POST /analyze            - Detect form fields in a PDF")
+    print("  POST /fill-agent-stream  - Fill form (agent mode, SSE streaming)")
+    print("  POST /fill-agent         - Fill form (agent mode)")
+    print("\nLegacy Endpoints (deprecated):")
     print("  POST /fill               - Fill (single-shot LLM mode)")
-    print("  POST /fill-agent         - Fill (agent mode with tools)")
-    print("  POST /fill-agent-stream  - Fill (agent mode, SSE streaming)")
     print("  POST /fill-preview       - Preview single-shot mode")
-    print("  POST /fill-agent-preview - Preview agent mode with log")
+    print("\nOther:")
     print("  GET  /docs               - API documentation (Swagger UI)")
     print("\nWeb UI: http://localhost:8000")
+    print("Next.js UI: http://localhost:3000 (run 'npm run dev' in web/)")
     print("\nTip: For auto-reload during development, run:")
     print("  uvicorn main:app --reload")
     print("="*60 + "\n")
-    
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
