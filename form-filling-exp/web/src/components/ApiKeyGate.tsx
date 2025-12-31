@@ -142,16 +142,27 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
             </button>
           </form>
 
-          <div className="mt-6 pt-6 border-t border-border">
+          <div className="mt-6 pt-6 border-t border-border space-y-2">
             <p className="text-xs text-foreground-muted text-center">
-              Don&apos;t have a key?{' '}
+              Don&apos;t have an account?{' '}
               <a
                 href="https://cloud.llamaindex.ai/"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-accent hover:underline"
+                className="text-accent hover:underline font-medium"
               >
-                Get one from LlamaCloud
+                Sign up for LlamaCloud
+              </a>
+            </p>
+            <p className="text-xs text-foreground-muted text-center">
+              Need help getting your API key?{' '}
+              <a
+                href="https://developers.llamaindex.ai/python/cloud/general/api_key/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent hover:underline font-medium"
+              >
+                See documentation
               </a>
             </p>
           </div>
