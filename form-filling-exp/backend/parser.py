@@ -5,9 +5,13 @@ Provides functionality to parse various file types (PDF, PPTX, DOCX, images)
 into markdown format for use as context in the form-filling agent.
 """
 
+import asyncio
 import os
 from pathlib import Path
 from typing import AsyncGenerator, Literal
+
+# Maximum concurrent LlamaParse requests (within rate limits)
+MAX_CONCURRENT_PARSE = 5
 
 # File extensions that don't need parsing (already text-based)
 SIMPLE_TEXT_EXTENSIONS = {
@@ -153,6 +157,7 @@ async def parse_files_stream(
 ) -> AsyncGenerator[dict, None]:
     """
     Parse multiple files with streaming status updates.
+    Files are processed in parallel with controlled concurrency.
 
     Args:
         files: List of (file_bytes, filename) tuples
@@ -163,96 +168,149 @@ async def parse_files_stream(
         Status updates and results as dicts
     """
     total = len(files)
-    results = []
 
     yield {"type": "start", "total": total, "mode": mode}
 
-    for i, (file_bytes, filename) in enumerate(files):
+    if total == 0:
         yield {
-            "type": "progress",
-            "current": i + 1,
-            "total": total,
-            "filename": filename,
-            "status": "parsing"
+            "type": "complete",
+            "results": [],
+            "success_count": 0,
+            "error_count": 0
         }
+        return
 
-        try:
-            # Check if file needs parsing
-            if is_simple_text(filename):
-                yield {
+    # Queue for collecting progress events from parallel tasks
+    event_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    # Semaphore to limit concurrent LlamaParse requests
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_PARSE)
+
+    # Results storage (index -> result)
+    results: dict[int, dict] = {}
+
+    async def parse_single_file(index: int, file_bytes: bytes, filename: str):
+        """Parse a single file and put progress events into the queue."""
+        async with semaphore:
+            # Emit "parsing" status
+            await event_queue.put({
+                "type": "progress",
+                "current": index + 1,
+                "total": total,
+                "filename": filename,
+                "status": "parsing"
+            })
+
+            try:
+                if is_simple_text(filename):
+                    # Text file - read directly
+                    await event_queue.put({
+                        "type": "progress",
+                        "current": index + 1,
+                        "total": total,
+                        "filename": filename,
+                        "status": "reading_text"
+                    })
+                    try:
+                        content = file_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = file_bytes.decode('latin-1')
+
+                    results[index] = {
+                        "filename": filename,
+                        "content": content,
+                        "parsed": False,
+                        "error": None
+                    }
+
+                elif needs_parsing(filename):
+                    # Complex file - use LlamaParse
+                    await event_queue.put({
+                        "type": "progress",
+                        "current": index + 1,
+                        "total": total,
+                        "filename": filename,
+                        "status": "llamaparse"
+                    })
+
+                    content = await parse_file(file_bytes, filename, mode, api_key=api_key)
+                    results[index] = {
+                        "filename": filename,
+                        "content": content,
+                        "parsed": True,
+                        "error": None
+                    }
+
+                else:
+                    # Unsupported file type
+                    ext = Path(filename).suffix.lower()
+                    results[index] = {
+                        "filename": filename,
+                        "content": None,
+                        "parsed": False,
+                        "error": f"Unsupported file type: {ext}"
+                    }
+
+                # Emit completion status
+                await event_queue.put({
                     "type": "progress",
-                    "current": i + 1,
+                    "current": index + 1,
                     "total": total,
                     "filename": filename,
-                    "status": "reading_text"
-                }
-                try:
-                    content = file_bytes.decode('utf-8')
-                except UnicodeDecodeError:
-                    content = file_bytes.decode('latin-1')
-
-                results.append({
-                    "filename": filename,
-                    "content": content,
-                    "parsed": False,
-                    "error": None
+                    "status": "complete"
                 })
 
-            elif needs_parsing(filename):
-                yield {
-                    "type": "progress",
-                    "current": i + 1,
-                    "total": total,
-                    "filename": filename,
-                    "status": "llamaparse"
-                }
-
-                content = await parse_file(file_bytes, filename, mode, api_key=api_key)
-                results.append({
-                    "filename": filename,
-                    "content": content,
-                    "parsed": True,
-                    "error": None
-                })
-
-            else:
-                ext = Path(filename).suffix.lower()
-                results.append({
+            except Exception as e:
+                results[index] = {
                     "filename": filename,
                     "content": None,
                     "parsed": False,
-                    "error": f"Unsupported file type: {ext}"
+                    "error": str(e)
+                }
+                await event_queue.put({
+                    "type": "progress",
+                    "current": index + 1,
+                    "total": total,
+                    "filename": filename,
+                    "status": "error",
+                    "error": str(e)
                 })
 
-            yield {
-                "type": "progress",
-                "current": i + 1,
-                "total": total,
-                "filename": filename,
-                "status": "complete"
-            }
+    # Create tasks for all files
+    tasks = [
+        asyncio.create_task(parse_single_file(i, file_bytes, filename))
+        for i, (file_bytes, filename) in enumerate(files)
+    ]
 
-        except Exception as e:
-            results.append({
-                "filename": filename,
-                "content": None,
-                "parsed": False,
-                "error": str(e)
-            })
-            yield {
-                "type": "progress",
-                "current": i + 1,
-                "total": total,
-                "filename": filename,
-                "status": "error",
-                "error": str(e)
-            }
+    # Sentinel to signal all tasks are done
+    async def wait_for_tasks():
+        await asyncio.gather(*tasks)
+        await event_queue.put({"type": "_done"})
+
+    asyncio.create_task(wait_for_tasks())
+
+    # Yield events as they arrive
+    completed_count = 0
+    while True:
+        event = await event_queue.get()
+
+        if event["type"] == "_done":
+            break
+
+        # Track completions for final summary
+        if event["type"] == "progress" and event.get("status") in ("complete", "error"):
+            completed_count += 1
+
+        yield event
+
+    # Build final results in original order
+    ordered_results = [results[i] for i in range(total)]
 
     yield {
         "type": "complete",
-        "results": results,
-        "success_count": sum(1 for r in results if r["error"] is None),
-        "error_count": sum(1 for r in results if r["error"] is not None)
+        "results": ordered_results,
+        "success_count": sum(1 for r in ordered_results if r["error"] is None),
+        "error_count": sum(1 for r in ordered_results if r["error"] is not None)
     }
 
 
