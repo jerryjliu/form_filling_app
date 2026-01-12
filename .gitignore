@@ -55,3 +55,7 @@ temp/
 # Cursor
 .cursor/
 
+# Research and Plans for claude code
+research/
+plans/
+
