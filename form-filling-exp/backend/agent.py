@@ -1146,18 +1146,16 @@ async def run_agent_stream(
     if context_files:
         session.context_files = context_files
 
-    # Build context files section if available - ONLY for first turn
-    # For continuations, context is already in conversation history via session resumption
+    # Build context files section if available
     context_section = ""
-    if not is_continuation:
-        all_context_files = session.context_files or []
-        if all_context_files:
-            context_parts = []
-            for cf in all_context_files:
-                filename = cf.get("filename", "unknown") if isinstance(cf, dict) else getattr(cf, "filename", "unknown")
-                content = cf.get("content", "") if isinstance(cf, dict) else getattr(cf, "content", "")
-                context_parts.append(f"### {filename}\n{content}")
-            context_section = f"""
+    all_context_files = session.context_files or []
+    if all_context_files:
+        context_parts = []
+        for cf in all_context_files:
+            filename = cf.get("filename", "unknown") if isinstance(cf, dict) else getattr(cf, "filename", "unknown")
+            content = cf.get("content", "") if isinstance(cf, dict) else getattr(cf, "content", "")
+            context_parts.append(f"### {filename}\n{content}")
+        context_section = f"""
 ## Reference Documents
 The user has provided the following documents as context for filling out the form. Use information from these documents to fill the form fields accurately.
 
@@ -1177,7 +1175,7 @@ The user has provided the following documents as context for filling out the for
             edits_summary = "\n".join(edits_list)
 
         prompt = f"""This is a CONTINUATION of a form-filling session.
-
+{context_section}
 PDF Path (already filled): {pdf_path}
 Output Path: {output_path or pdf_path}
 
