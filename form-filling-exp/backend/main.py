@@ -32,8 +32,19 @@ from llm import map_instructions_to_fields
 from agent import run_agent, run_agent_stream, AGENT_SDK_AVAILABLE, AGENT_SDK_ERROR, _session_manager
 from parser import (
     parse_files_stream, needs_parsing, is_simple_text,
-    LLAMAPARSE_AVAILABLE, LLAMAPARSE_ERROR, ParsedFile
+    LLAMAPARSE_AVAILABLE, LLAMAPARSE_ERROR, ParsedFile,
+    estimate_file_chars
 )
+
+
+# ============================================================================
+# Token Budget Constants
+# ============================================================================
+
+# Token budget for context files (60% of Claude's 200k context window)
+MAX_CONTEXT_TOKENS = 120_000
+CHARS_PER_TOKEN = 4  # Rough estimate for English text
+MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN  # 480,000
 
 
 # ============================================================================
@@ -641,8 +652,8 @@ async def parse_context_files(
         raise HTTPException(status_code=400, detail="Invalid API key format")
 
     # Validate file count
-    if len(files) > 5:
-        raise HTTPException(status_code=400, detail="Maximum 5 files allowed")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 files allowed")
 
     if len(files) == 0:
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -665,31 +676,78 @@ async def parse_context_files(
         content = await f.read()
         file_data.append((content, f.filename or "unknown"))
 
+    # Pre-validation: estimate token usage before expensive LlamaParse calls
+    # Use 80% threshold to be conservative (LlamaParse often extracts more than raw extraction)
+    PRE_VALIDATION_THRESHOLD = int(MAX_CONTEXT_CHARS * 0.8)
+
+    estimated_chars = 0
+    file_estimates = []
+    for file_bytes, filename in file_data:
+        est = estimate_file_chars(file_bytes, filename)
+        estimated_chars += est
+        file_estimates.append((filename, est))
+
+    estimated_tokens = estimated_chars // CHARS_PER_TOKEN
+
+    if estimated_chars > PRE_VALIDATION_THRESHOLD:
+        # Sort by size to show largest files first
+        file_estimates.sort(key=lambda x: x[1], reverse=True)
+        largest_files = ", ".join(f"{name} (~{chars//CHARS_PER_TOKEN:,} tokens)"
+                                  for name, chars in file_estimates[:3])
+
+        async def rejection_stream():
+            yield f"data: {json.dumps({'type': 'error', 'error': f'Files likely exceed token limit before parsing. Estimated ~{estimated_tokens:,} tokens, limit is {MAX_CONTEXT_TOKENS:,} tokens. Largest files: {largest_files}. Please upload fewer or smaller files.'})}\n\n"
+
+        return StreamingResponse(
+            rejection_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        )
+
+    print(f"[Parse] Pre-validation passed: ~{estimated_tokens:,} estimated tokens for {len(file_data)} files")
+
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'init', 'message': f'Starting to parse {len(file_data)} file(s)...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'init', 'message': f'Starting to parse {len(file_data)} file(s) (~{estimated_tokens:,} estimated tokens)...'})}\n\n"
 
         try:
             async for event in parse_files_stream(file_data, parse_mode, api_key=api_key):
-                yield f"data: {json.dumps(event)}\n\n"
+                # If this is the complete event, validate token budget before storing
+                if event.get("type") == "complete":
+                    results = event.get("results", [])
 
-                # If this is the complete event, also store in session if session_id provided
-                if event.get("type") == "complete" and user_session_id:
-                    # Use get_or_create to ensure session exists for storing context files
-                    session = _session_manager.get_or_create_session(user_session_id)
-                    if session:
-                        # Store parsed files in session
-                        parsed_files = []
-                        for result in event.get("results", []):
-                            if result.get("content"):
-                                parsed_files.append(ParsedFile(
-                                    filename=result["filename"],
-                                    content=result["content"],
-                                    was_parsed=result.get("parsed", False)
-                                ))
-                        session.context_files = parsed_files
-                        # Save session to persist the context files
-                        _session_manager._save_session_to_db(session)
-                        print(f"[Parse] Stored {len(parsed_files)} context files in session {user_session_id}")
+                    # Validate total token usage before storing
+                    total_chars = sum(
+                        len(r.get("content", ""))
+                        for r in results
+                        if r.get("content")
+                    )
+                    final_tokens = total_chars // CHARS_PER_TOKEN
+
+                    if total_chars > MAX_CONTEXT_CHARS:
+                        yield f"data: {json.dumps({'type': 'error', 'error': f'Total content exceeds token limit. Estimated {final_tokens:,} tokens ({total_chars:,} chars), max is {MAX_CONTEXT_TOKENS:,} tokens ({MAX_CONTEXT_CHARS:,} chars). Please upload fewer or smaller files.'})}\n\n"
+                        return
+
+                    # Store in session if validation passed
+                    if user_session_id:
+                        session = _session_manager.get_or_create_session(user_session_id)
+                        if session:
+                            parsed_files = []
+                            for result in results:
+                                if result.get("content"):
+                                    parsed_files.append(ParsedFile(
+                                        filename=result["filename"],
+                                        content=result["content"],
+                                        was_parsed=result.get("parsed", False)
+                                    ))
+                            session.context_files = parsed_files
+                            _session_manager._save_session_to_db(session)
+                            print(f"[Parse] Stored {len(parsed_files)} context files ({final_tokens:,} tokens) in session {user_session_id}")
+
+                    # Add token info to the complete event
+                    event["estimated_tokens"] = final_tokens
+                    event["max_tokens"] = MAX_CONTEXT_TOKENS
+
+                yield f"data: {json.dumps(event)}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"

@@ -205,6 +205,15 @@ export default function Home() {
             });
           }
 
+          if (event.type === 'error' && event.error) {
+            // Show error message to user
+            setMessages((prev) => [
+              ...prev,
+              createMessage('system', `Error: ${event.error}`),
+            ]);
+            return; // Stop processing
+          }
+
           if (event.type === 'complete' && event.results) {
             for (const result of event.results) {
               if (result.content && !result.error) {

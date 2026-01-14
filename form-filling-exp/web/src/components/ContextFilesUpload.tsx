@@ -33,7 +33,7 @@ export default function ContextFilesUpload({
   isUploading,
   parseProgress,
   disabled,
-  maxFiles = 5,
+  maxFiles = 10,
 }: ContextFilesUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [parseMode, setParseMode] = useState<'cost_effective' | 'agentic_plus'>('cost_effective');

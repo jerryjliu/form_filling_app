@@ -55,6 +55,98 @@ def is_simple_text(filename: str) -> bool:
     return ext in SIMPLE_TEXT_EXTENSIONS
 
 
+def estimate_file_chars(file_bytes: bytes, filename: str) -> int:
+    """
+    Quickly estimate the character count of a file's text content.
+
+    This is used for pre-validation before expensive LlamaParse calls.
+    The estimate is intentionally conservative (may overestimate) to avoid
+    wasting time on files that will be rejected anyway.
+
+    Args:
+        file_bytes: The file content as bytes
+        filename: The original filename
+
+    Returns:
+        Estimated character count of extracted text
+    """
+    ext = Path(filename).suffix.lower()
+
+    # Simple text files - just return byte length (roughly char count for UTF-8)
+    if is_simple_text(filename):
+        return len(file_bytes)
+
+    # Images - OCR output varies wildly, use conservative fixed estimate
+    # A typical page of OCR'd text is ~2000-3000 chars
+    if ext in {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}:
+        # Estimate based on file size - larger images often have more text
+        # But cap it since very large images might just be high-res photos
+        size_mb = len(file_bytes) / (1024 * 1024)
+        return min(int(size_mb * 3000), 10000)  # ~3k chars per MB, max 10k
+
+    # PDFs - use PyMuPDF for quick text extraction
+    if ext == '.pdf':
+        try:
+            import fitz
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            total_chars = 0
+            for page in doc:
+                text = page.get_text()
+                total_chars += len(text)
+            doc.close()
+            # Add 20% buffer since LlamaParse often extracts more (tables, etc.)
+            return int(total_chars * 1.2)
+        except Exception as e:
+            print(f"[Estimate] PDF extraction failed for {filename}: {e}")
+            # Fallback: estimate based on file size (~1000 chars per KB for PDFs)
+            return len(file_bytes) // 10
+
+    # DOCX - use python-docx for quick text extraction
+    if ext in {'.docx', '.doc'}:
+        try:
+            from docx import Document
+            import io
+            doc = Document(io.BytesIO(file_bytes))
+            total_chars = 0
+            for para in doc.paragraphs:
+                total_chars += len(para.text)
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        total_chars += len(cell.text)
+            return int(total_chars * 1.1)  # Small buffer
+        except ImportError:
+            print("[Estimate] python-docx not available, using file size heuristic")
+            return len(file_bytes) // 5  # ~200 chars per KB for DOCX
+        except Exception as e:
+            print(f"[Estimate] DOCX extraction failed for {filename}: {e}")
+            return len(file_bytes) // 5
+
+    # PPTX - use python-pptx for quick text extraction
+    if ext in {'.pptx', '.ppt'}:
+        try:
+            from pptx import Presentation
+            import io
+            prs = Presentation(io.BytesIO(file_bytes))
+            total_chars = 0
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        total_chars += len(shape.text)
+            return int(total_chars * 1.2)  # Buffer for tables/images
+        except Exception as e:
+            print(f"[Estimate] PPTX extraction failed for {filename}: {e}")
+            return len(file_bytes) // 8  # ~125 chars per KB for PPTX
+
+    # XLSX - estimate based on file size
+    if ext in {'.xlsx', '.xls'}:
+        # Spreadsheets can be very dense with data
+        return len(file_bytes) // 3  # ~333 chars per KB
+
+    # Unknown file type - conservative estimate
+    return len(file_bytes) // 4
+
+
 def get_parser(mode: ParseMode = "cost_effective", api_key: str | None = None) -> "LlamaParse":
     """
     Get a LlamaParse instance with the specified mode.

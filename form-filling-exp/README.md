@@ -137,7 +137,7 @@ Open http://localhost:3000 in your browser.
 
 For complex forms, upload reference documents that contain the information to fill:
 
-1. **Upload Context Files**: In the chat panel, upload up to 5 files (PDF, DOCX, PPTX, images, or text files)
+1. **Upload Context Files**: In the chat panel, upload up to 10 files (PDF, DOCX, PPTX, images, or text files)
 2. **Choose Parse Mode**:
    - **Cost Effective**: Faster, lower cost parsing
    - **Agentic Plus**: Higher quality extraction for complex documents
