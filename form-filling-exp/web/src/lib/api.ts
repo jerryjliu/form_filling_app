@@ -23,6 +23,23 @@ export async function validateApiKey(apiKey: string): Promise<{ valid: boolean; 
   return response.json();
 }
 
+export async function validateAnthropicApiKey(apiKey: string): Promise<{ valid: boolean; message: string }> {
+  const formData = new FormData();
+  formData.append('api_key', apiKey);
+
+  const response = await fetch(`${API_BASE}/validate-anthropic-key`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to validate API key' }));
+    throw new Error(error.detail || 'Failed to validate API key');
+  }
+
+  return response.json();
+}
+
 export async function analyzePdf(file: File): Promise<AnalyzeResponse> {
   const formData = new FormData();
   formData.append('file', file);
@@ -48,12 +65,13 @@ export interface StreamAgentFillOptions {
   previousEdits?: Record<string, unknown> | null;
   resumeSessionId?: string | null;  // Agent session ID to resume conversation context
   userSessionId?: string | null;  // User's form-filling session ID (for concurrent user support)
+  anthropicApiKey?: string | null;  // User's Anthropic API key for Claude calls
 }
 
 export async function* streamAgentFill(
   options: StreamAgentFillOptions
 ): AsyncGenerator<StreamEvent> {
-  const { file, instructions, filledPdfBytes, isContinuation, previousEdits, resumeSessionId, userSessionId } = options;
+  const { file, instructions, filledPdfBytes, isContinuation, previousEdits, resumeSessionId, userSessionId, anthropicApiKey } = options;
 
   const formData = new FormData();
 
@@ -78,6 +96,10 @@ export async function* streamAgentFill(
 
   if (userSessionId) {
     formData.append('user_session_id', userSessionId);
+  }
+
+  if (anthropicApiKey) {
+    formData.append('anthropic_api_key', anthropicApiKey);
   }
 
   const response = await fetch(`${API_BASE}/fill-agent-stream`, {

@@ -44,21 +44,26 @@ class FormEdits(BaseModel):
 # Configuration
 # ============================================================================
 
-def get_client() -> anthropic.Anthropic:
+def get_client(api_key: str | None = None) -> anthropic.Anthropic:
     """
     Get the Anthropic client.
-    
-    Set ANTHROPIC_API_KEY environment variable.
+
+    Args:
+        api_key: Optional API key. If not provided, falls back to ANTHROPIC_API_KEY env var.
+
+    Returns:
+        Configured Anthropic client instance.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    
-    if not api_key:
+    # Use provided key or fall back to env var
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+    if not key:
         raise ValueError(
-            "ANTHROPIC_API_KEY environment variable is required. "
-            "Set it with: export ANTHROPIC_API_KEY=your-key-here"
+            "Anthropic API key is required. "
+            "Either pass api_key parameter or set ANTHROPIC_API_KEY environment variable."
         )
-    
-    return anthropic.Anthropic(api_key=api_key)
+
+    return anthropic.Anthropic(api_key=key)
 
 
 # Default model - structured outputs supported on Sonnet 4.5, Opus 4.5, Haiku 4.5

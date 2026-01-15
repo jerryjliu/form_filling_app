@@ -91,6 +91,8 @@ class FormFillingSession:
         self.is_continuation: bool = False
         # Context files parsed with LlamaParse (list of ParsedFile-like dicts)
         self.context_files: list = []
+        # Anthropic API key for this session (user-provided)
+        self.anthropic_api_key: str | None = None
 
     def reset(self):
         """Reset session state for a new form filling operation."""
@@ -1100,6 +1102,7 @@ async def run_agent_stream(
     user_session_id: str | None = None,
     original_pdf_bytes: bytes | None = None,
     context_files: list | None = None,
+    anthropic_api_key: str | None = None,
 ):
     """
     Run the agent and yield messages as they come in (for streaming).
@@ -1117,6 +1120,7 @@ async def run_agent_stream(
         user_session_id: Unique ID for this user's form-filling session (for concurrent users)
         original_pdf_bytes: The original (unfilled) PDF bytes for first-turn sessions
         context_files: List of parsed context files (dicts with filename, content, was_parsed)
+        anthropic_api_key: User-provided Anthropic API key for Claude calls
 
     Yields:
         dict: Serialized message from the agent, including session_id in complete event
@@ -1229,6 +1233,13 @@ Start by loading the PDF, then list the fields, fill them according to the instr
     turn_input_tokens = 0
     turn_output_tokens = 0
 
+    # Set API key in environment if provided (for Claude SDK to use)
+    import os as os_module
+    original_api_key = os_module.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_api_key:
+        os_module.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+        print(f"[Agent Stream] Using user-provided Anthropic API key")
+
     try:
         async with ClaudeSDKClient(options=options) as client:
             print(f"[Agent Stream] Connected, sending query...")
@@ -1289,6 +1300,13 @@ Start by loading the PDF, then list the fields, fill them according to the instr
         import traceback
         traceback.print_exc()
         yield {"type": "error", "error": f"Agent error: {str(e)}"}
+    finally:
+        # Restore original API key
+        if anthropic_api_key:
+            if original_api_key:
+                os_module.environ["ANTHROPIC_API_KEY"] = original_api_key
+            elif "ANTHROPIC_API_KEY" in os_module.environ:
+                del os_module.environ["ANTHROPIC_API_KEY"]
 
     # Log token usage summary
     turn_type = "CONTINUATION" if is_continuation else "NEW SESSION"
@@ -1325,6 +1343,7 @@ async def run_agent(
     is_continuation: bool = False,
     previous_edits: dict[str, Any] | None = None,
     user_session_id: str | None = None,
+    anthropic_api_key: str | None = None,
 ) -> dict:
     """
     Run the form-filling agent using ClaudeSDKClient.
@@ -1336,6 +1355,7 @@ async def run_agent(
         is_continuation: Whether this is a continuation of a previous session
         previous_edits: Dict of field_id -> value from previous turns
         user_session_id: Unique ID for this user's form-filling session (for concurrent users)
+        anthropic_api_key: User-provided Anthropic API key for Claude calls
 
     Returns:
         Summary of the agent execution
@@ -1383,17 +1403,32 @@ Start by loading the PDF, then list the fields, fill them according to the instr
     messages = []
     result_text = ""
 
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
+    # Set API key in environment if provided (for Claude SDK to use)
+    import os as os_module
+    original_api_key = os_module.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_api_key:
+        os_module.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+        print(f"[Agent] Using user-provided Anthropic API key")
 
-        async for message in client.receive_response():
-            messages.append(message)
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
 
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        result_text = block.text
-                        print(f"  Agent: {result_text[:100]}...")
+            async for message in client.receive_response():
+                messages.append(message)
+
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            result_text = block.text
+                            print(f"  Agent: {result_text[:100]}...")
+    finally:
+        # Restore original API key
+        if anthropic_api_key:
+            if original_api_key:
+                os_module.environ["ANTHROPIC_API_KEY"] = original_api_key
+            elif "ANTHROPIC_API_KEY" in os_module.environ:
+                del os_module.environ["ANTHROPIC_API_KEY"]
 
     # Save session state to database for persistence across server restarts
     _session_manager.save_session(session)

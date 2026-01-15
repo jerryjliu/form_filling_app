@@ -466,6 +466,7 @@ async def fill_pdf_agent_stream(
     previous_edits: Optional[str] = Form(None),  # JSON string of field_id -> value
     resume_session_id: Optional[str] = Form(None),  # Session ID from previous turn
     user_session_id: Optional[str] = Form(None),  # Unique ID for this user's form-filling session
+    anthropic_api_key: Optional[str] = Form(None),  # User's Anthropic API key
 ):
     """
     Fill a PDF form using agent mode with real-time streaming.
@@ -479,6 +480,7 @@ async def fill_pdf_agent_stream(
         previous_edits: JSON string of {field_id: value} from previous turns
         resume_session_id: Session ID from previous turn to resume conversation context
         user_session_id: Unique ID for this user's form-filling session (for concurrent users)
+        anthropic_api_key: User's Anthropic API key for Claude calls
 
     Event types:
     - init: Session initialized with field count
@@ -549,6 +551,7 @@ async def fill_pdf_agent_stream(
                 resume_session_id=resume_session_id,
                 user_session_id=user_session_id,
                 original_pdf_bytes=pdf_bytes if not is_continuation else None,
+                anthropic_api_key=anthropic_api_key,
             ):
                 message_count += 1
                 # Convert message to JSON and send as SSE
@@ -830,6 +833,71 @@ async def validate_api_key(api_key: str = Form(...)):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to connect to LlamaCloud: {str(e)}"
+        )
+
+
+@app.post("/validate-anthropic-key")
+async def validate_anthropic_key(api_key: str = Form(...)):
+    """
+    Validate an Anthropic API key by making a test request.
+
+    This endpoint is used to gate access to the application.
+    Users must provide a valid Anthropic API key before using the app.
+    """
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=400, detail="API key is required")
+
+    api_key = api_key.strip()
+
+    # Validate key format (Anthropic keys start with "sk-ant-")
+    if not api_key.startswith("sk-ant-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid API key format. Anthropic API keys start with 'sk-ant-'"
+        )
+
+    # Test the key by making a request to Anthropic API
+    try:
+        import httpx
+
+        # Use the Anthropic API models endpoint to validate the key
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                timeout=10.0,
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid API key. Please check your Anthropic API key."
+                )
+            elif response.status_code == 403:
+                raise HTTPException(
+                    status_code=403,
+                    detail="API key does not have permission. Please check your Anthropic account."
+                )
+            elif response.status_code >= 400:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to validate API key: {response.text}"
+                )
+
+            return {"valid": True, "message": "API key is valid"}
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Timeout while validating API key. Please try again."
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to connect to Anthropic: {str(e)}"
         )
 
 

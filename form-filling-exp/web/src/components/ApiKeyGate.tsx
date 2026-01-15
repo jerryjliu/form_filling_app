@@ -1,36 +1,50 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { validateApiKey } from '@/lib/api';
+import { validateApiKey, validateAnthropicApiKey } from '@/lib/api';
 
-const API_KEY_STORAGE_KEY = 'llama-cloud-api-key';
+const LLAMA_API_KEY_STORAGE_KEY = 'llama-cloud-api-key';
+const ANTHROPIC_API_KEY_STORAGE_KEY = 'anthropic-api-key';
 
 interface ApiKeyGateProps {
   children: React.ReactNode;
-  onApiKeyValidated: (apiKey: string) => void;
+  onApiKeysValidated: (llamaApiKey: string, anthropicApiKey: string) => void;
 }
 
-export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGateProps) {
-  const [apiKey, setApiKey] = useState('');
+export default function ApiKeyGate({ children, onApiKeysValidated }: ApiKeyGateProps) {
+  const [llamaApiKey, setLlamaApiKey] = useState('');
+  const [anthropicApiKey, setAnthropicApiKey] = useState('');
   const [isValidating, setIsValidating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [llamaError, setLlamaError] = useState<string | null>(null);
+  const [anthropicError, setAnthropicError] = useState<string | null>(null);
   const [isValidated, setIsValidated] = useState(false);
   const [isCheckingStored, setIsCheckingStored] = useState(true);
 
-  // Check for stored API key on mount
+  // Check for stored API keys on mount
   useEffect(() => {
-    const storedKey = localStorage.getItem(API_KEY_STORAGE_KEY);
-    if (storedKey) {
-      // Validate the stored key
+    const storedLlamaKey = localStorage.getItem(LLAMA_API_KEY_STORAGE_KEY);
+    const storedAnthropicKey = localStorage.getItem(ANTHROPIC_API_KEY_STORAGE_KEY);
+
+    if (storedLlamaKey && storedAnthropicKey) {
+      // Validate both stored keys
       setIsValidating(true);
-      validateApiKey(storedKey)
-        .then(() => {
-          setIsValidated(true);
-          onApiKeyValidated(storedKey);
-        })
-        .catch(() => {
-          // Stored key is invalid, clear it
-          localStorage.removeItem(API_KEY_STORAGE_KEY);
+      Promise.all([
+        validateApiKey(storedLlamaKey).catch(() => null),
+        validateAnthropicApiKey(storedAnthropicKey).catch(() => null),
+      ])
+        .then(([llamaResult, anthropicResult]) => {
+          if (llamaResult && anthropicResult) {
+            setIsValidated(true);
+            onApiKeysValidated(storedLlamaKey, storedAnthropicKey);
+          } else {
+            // One or both keys are invalid, clear invalid ones
+            if (!llamaResult) {
+              localStorage.removeItem(LLAMA_API_KEY_STORAGE_KEY);
+            }
+            if (!anthropicResult) {
+              localStorage.removeItem(ANTHROPIC_API_KEY_STORAGE_KEY);
+            }
+          }
         })
         .finally(() => {
           setIsCheckingStored(false);
@@ -39,33 +53,56 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
     } else {
       setIsCheckingStored(false);
     }
-  }, [onApiKeyValidated]);
+  }, [onApiKeysValidated]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!apiKey.trim()) {
-      setError('Please enter an API key');
+    setLlamaError(null);
+    setAnthropicError(null);
+
+    // Validate both keys are provided
+    if (!llamaApiKey.trim()) {
+      setLlamaError('Please enter a LlamaCloud API key');
+      return;
+    }
+    if (!anthropicApiKey.trim()) {
+      setAnthropicError('Please enter an Anthropic API key');
       return;
     }
 
     setIsValidating(true);
-    setError(null);
 
     try {
-      await validateApiKey(apiKey.trim());
-      // Store the key
-      localStorage.setItem(API_KEY_STORAGE_KEY, apiKey.trim());
-      setIsValidated(true);
-      onApiKeyValidated(apiKey.trim());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to validate API key');
+      // Validate both keys in parallel
+      const [llamaResult, anthropicResult] = await Promise.allSettled([
+        validateApiKey(llamaApiKey.trim()),
+        validateAnthropicApiKey(anthropicApiKey.trim()),
+      ]);
+
+      // Check LlamaCloud key result
+      if (llamaResult.status === 'rejected') {
+        setLlamaError(llamaResult.reason instanceof Error ? llamaResult.reason.message : 'Failed to validate LlamaCloud API key');
+      }
+
+      // Check Anthropic key result
+      if (anthropicResult.status === 'rejected') {
+        setAnthropicError(anthropicResult.reason instanceof Error ? anthropicResult.reason.message : 'Failed to validate Anthropic API key');
+      }
+
+      // If both are valid, store and proceed
+      if (llamaResult.status === 'fulfilled' && anthropicResult.status === 'fulfilled') {
+        localStorage.setItem(LLAMA_API_KEY_STORAGE_KEY, llamaApiKey.trim());
+        localStorage.setItem(ANTHROPIC_API_KEY_STORAGE_KEY, anthropicApiKey.trim());
+        setIsValidated(true);
+        onApiKeysValidated(llamaApiKey.trim(), anthropicApiKey.trim());
+      }
     } finally {
       setIsValidating(false);
     }
   };
 
-  // Show loading while checking stored key
+  // Show loading while checking stored keys
   if (isCheckingStored) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -97,38 +134,59 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
           <p className="text-foreground-muted mt-2">AI-powered PDF form completion</p>
         </div>
 
-        {/* API Key Form */}
+        {/* API Keys Form */}
         <div className="bg-background-secondary rounded-xl p-6 border border-border">
-          <h2 className="text-lg font-semibold text-foreground mb-2">Enter Your API Key</h2>
+          <h2 className="text-lg font-semibold text-foreground mb-2">Enter Your API Keys</h2>
           <p className="text-sm text-foreground-muted mb-6">
-            This app requires a LlamaCloud API key to function. Your key is stored locally and never sent to our servers.
+            This app requires both a LlamaCloud API key (for document parsing) and an Anthropic API key (for AI processing). Your keys are stored locally and never sent to our servers.
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* LlamaCloud API Key */}
             <div>
-              <label htmlFor="apiKey" className="block text-sm font-medium text-foreground-secondary mb-2">
+              <label htmlFor="llamaApiKey" className="block text-sm font-medium text-foreground-secondary mb-2">
                 LlamaCloud API Key
               </label>
               <input
-                id="apiKey"
+                id="llamaApiKey"
                 type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                value={llamaApiKey}
+                onChange={(e) => setLlamaApiKey(e.target.value)}
                 placeholder="llx-..."
                 disabled={isValidating}
                 className="w-full px-4 py-3 rounded-lg bg-background border border-border text-foreground placeholder:text-foreground-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-50"
               />
+              {llamaError && (
+                <div className="mt-2 px-3 py-2 rounded-lg bg-error/10 border border-error/20 text-error text-sm">
+                  {llamaError}
+                </div>
+              )}
             </div>
 
-            {error && (
-              <div className="px-4 py-3 rounded-lg bg-error/10 border border-error/20 text-error text-sm">
-                {error}
-              </div>
-            )}
+            {/* Anthropic API Key */}
+            <div>
+              <label htmlFor="anthropicApiKey" className="block text-sm font-medium text-foreground-secondary mb-2">
+                Anthropic API Key
+              </label>
+              <input
+                id="anthropicApiKey"
+                type="password"
+                value={anthropicApiKey}
+                onChange={(e) => setAnthropicApiKey(e.target.value)}
+                placeholder="sk-ant-..."
+                disabled={isValidating}
+                className="w-full px-4 py-3 rounded-lg bg-background border border-border text-foreground placeholder:text-foreground-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-50"
+              />
+              {anthropicError && (
+                <div className="mt-2 px-3 py-2 rounded-lg bg-error/10 border border-error/20 text-error text-sm">
+                  {anthropicError}
+                </div>
+              )}
+            </div>
 
             <button
               type="submit"
-              disabled={isValidating || !apiKey.trim()}
+              disabled={isValidating || !llamaApiKey.trim() || !anthropicApiKey.trim()}
               className="w-full px-4 py-3 rounded-lg bg-accent text-white font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
             >
               {isValidating ? (
@@ -144,7 +202,7 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
 
           <div className="mt-6 pt-6 border-t border-border space-y-2">
             <p className="text-xs text-foreground-muted text-center">
-              Don&apos;t have an account?{' '}
+              Don&apos;t have a LlamaCloud account?{' '}
               <a
                 href="https://cloud.llamaindex.ai/"
                 target="_blank"
@@ -155,14 +213,14 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
               </a>
             </p>
             <p className="text-xs text-foreground-muted text-center">
-              Need help getting your API key?{' '}
+              Don&apos;t have an Anthropic account?{' '}
               <a
-                href="https://developers.llamaindex.ai/python/cloud/general/api_key/"
+                href="https://console.anthropic.com/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-accent hover:underline font-medium"
               >
-                See documentation
+                Sign up for Anthropic
               </a>
             </p>
           </div>
@@ -177,14 +235,31 @@ export default function ApiKeyGate({ children, onApiKeyValidated }: ApiKeyGatePr
   );
 }
 
-// Export helper to get stored API key
-export function getStoredApiKey(): string | null {
+// Export helper to get stored LlamaCloud API key
+export function getStoredLlamaApiKey(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(API_KEY_STORAGE_KEY);
+  return localStorage.getItem(LLAMA_API_KEY_STORAGE_KEY);
 }
 
-// Export helper to clear stored API key
-export function clearStoredApiKey(): void {
+// Export helper to get stored Anthropic API key
+export function getStoredAnthropicApiKey(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(ANTHROPIC_API_KEY_STORAGE_KEY);
+}
+
+// Export helper to clear stored API keys
+export function clearStoredApiKeys(): void {
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(API_KEY_STORAGE_KEY);
+  localStorage.removeItem(LLAMA_API_KEY_STORAGE_KEY);
+  localStorage.removeItem(ANTHROPIC_API_KEY_STORAGE_KEY);
+}
+
+// Backwards-compatible alias (deprecated)
+export function getStoredApiKey(): string | null {
+  return getStoredLlamaApiKey();
+}
+
+// Backwards-compatible alias (deprecated)
+export function clearStoredApiKey(): void {
+  clearStoredApiKeys();
 }

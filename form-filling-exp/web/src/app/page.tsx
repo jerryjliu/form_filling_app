@@ -14,14 +14,15 @@ import {
 } from '@/lib/session';
 import LeftPanel from '@/components/LeftPanel';
 import ChatPanel from '@/components/ChatPanel';
-import ApiKeyGate, { clearStoredApiKey } from '@/components/ApiKeyGate';
+import ApiKeyGate, { clearStoredApiKeys } from '@/components/ApiKeyGate';
 
 // Helper to generate unique IDs
 const generateId = () => Math.random().toString(36).substring(2, 11);
 
 export default function Home() {
-  // LlamaCloud API key (required to use the app)
+  // API keys (required to use the app)
   const [llamaApiKey, setLlamaApiKey] = useState<string | null>(null);
+  const [anthropicApiKey, setAnthropicApiKey] = useState<string | null>(null);
 
   const [sessionId, setSessionId] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
@@ -287,6 +288,7 @@ export default function Home() {
           previousEdits: appliedEdits,
           resumeSessionId: agentSessionId,
           userSessionId: userSessionId,
+          anthropicApiKey: anthropicApiKey,
         })) {
           const logEntry = createLogEntry(event);
 
@@ -420,11 +422,17 @@ export default function Home() {
         setStatusMessage('');
       }
     },
-    [file, filledPdfBytes, appliedEdits, agentSessionId, userSessionId, sessionId, fields, messages]
+    [file, filledPdfBytes, appliedEdits, agentSessionId, userSessionId, sessionId, fields, messages, anthropicApiKey]
   );
 
+  // Handler for when both API keys are validated
+  const handleApiKeysValidated = useCallback((llama: string, anthropic: string) => {
+    setLlamaApiKey(llama);
+    setAnthropicApiKey(anthropic);
+  }, []);
+
   return (
-    <ApiKeyGate onApiKeyValidated={setLlamaApiKey}>
+    <ApiKeyGate onApiKeysValidated={handleApiKeysValidated}>
     <div className="h-screen flex flex-col bg-background">
       {/* Header */}
       <header className="flex-shrink-0 px-6 py-3 border-b border-border flex items-center justify-between">
@@ -455,12 +463,13 @@ export default function Home() {
           </a>
           <button
             onClick={() => {
-              clearStoredApiKey();
+              clearStoredApiKeys();
               setLlamaApiKey(null);
+              setAnthropicApiKey(null);
               window.location.reload();
             }}
             className="text-xs text-foreground-muted hover:text-error transition-colors"
-            title="Sign out and clear API key"
+            title="Sign out and clear API keys"
           >
             Sign Out
           </button>
