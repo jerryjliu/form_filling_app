@@ -667,7 +667,14 @@ if AGENT_SDK_AVAILABLE:
                         if field.field_type == FieldType.CHECKBOX:
                             widget.field_value = bool(value)
                         else:
-                            widget.field_value = str(value)
+                            str_value = str(value)
+                            if str_value:
+                                widget.field_value = str_value
+                            else:
+                                # PyMuPDF bug: empty strings don't persist after save
+                                # Use a single space as workaround for "clearing" fields
+                                print(f"[commit_edits] Clearing field {field_id} (was: {widget.field_value})")
+                                widget.field_value = " "
                         widget.update()
                         applied.append({"field_id": field_id, "value": value})
                         session.applied_edits[field_id] = value
@@ -1146,16 +1153,18 @@ async def run_agent_stream(
     if context_files:
         session.context_files = context_files
 
-    # Build context files section if available
+    # Build context files section if available - ONLY for first turn
+    # For continuations, context is already in conversation history via session resumption
     context_section = ""
-    all_context_files = session.context_files or []
-    if all_context_files:
-        context_parts = []
-        for cf in all_context_files:
-            filename = cf.get("filename", "unknown") if isinstance(cf, dict) else getattr(cf, "filename", "unknown")
-            content = cf.get("content", "") if isinstance(cf, dict) else getattr(cf, "content", "")
-            context_parts.append(f"### {filename}\n{content}")
-        context_section = f"""
+    if not is_continuation:
+        all_context_files = session.context_files or []
+        if all_context_files:
+            context_parts = []
+            for cf in all_context_files:
+                filename = cf.get("filename", "unknown") if isinstance(cf, dict) else getattr(cf, "filename", "unknown")
+                content = cf.get("content", "") if isinstance(cf, dict) else getattr(cf, "content", "")
+                context_parts.append(f"### {filename}\n{content}")
+            context_section = f"""
 ## Reference Documents
 The user has provided the following documents as context for filling out the form. Use information from these documents to fill the form fields accurately.
 
@@ -1175,7 +1184,7 @@ The user has provided the following documents as context for filling out the for
             edits_summary = "\n".join(edits_list)
 
         prompt = f"""This is a CONTINUATION of a form-filling session.
-{context_section}
+
 PDF Path (already filled): {pdf_path}
 Output Path: {output_path or pdf_path}
 
@@ -1198,6 +1207,14 @@ Instructions: {instructions}
 
 Start by loading the PDF, then list the fields, fill them according to the instructions, and commit the edits."""
 
+    # Log prompt size breakdown for debugging token usage
+    context_chars = len(context_section)
+    prompt_chars = len(prompt)
+    estimated_context_tokens = context_chars // 4  # rough estimate
+    estimated_prompt_tokens = prompt_chars // 4
+    print(f"[Prompt Size] Context section: {context_chars} chars (~{estimated_context_tokens} tokens)")
+    print(f"[Prompt Size] Full prompt: {prompt_chars} chars (~{estimated_prompt_tokens} tokens)")
+
     print(f"[Agent Stream] Creating ClaudeSDKClient...")
     yield {"type": "status", "message": "Connecting to Claude Agent SDK..."}
 
@@ -1205,6 +1222,12 @@ Start by loading the PDF, then list the fields, fill them according to the instr
     message_count = 0
     result_text = ""
     agent_session_id = None  # Will be extracted from ResultMessage
+
+    # Token usage tracking
+    total_input_tokens = 0
+    total_output_tokens = 0
+    turn_input_tokens = 0
+    turn_output_tokens = 0
 
     try:
         async with ClaudeSDKClient(options=options) as client:
@@ -1242,6 +1265,23 @@ Start by loading the PDF, then list the fields, fill them according to the instr
                         content_preview = str(message.text)[:150]
                     print(f"[Agent Stream] #{message_count} {msg_type}: {content_preview}")
 
+                # Extract and log token usage if available (only on ResultMessage)
+                if hasattr(message, 'usage') and isinstance(message.usage, dict):
+                    usage = message.usage
+                    msg_input = usage.get('input_tokens', 0)
+                    msg_output = usage.get('output_tokens', 0)
+                    cache_read = usage.get('cache_read_input_tokens', 0)
+                    cache_creation = usage.get('cache_creation_input_tokens', 0)
+                    total_input = msg_input + cache_read + cache_creation
+
+                    turn_input_tokens = total_input
+                    turn_output_tokens = msg_output
+                    total_input_tokens = total_input
+                    total_output_tokens = msg_output
+
+                    print(f"[Token Usage] input={msg_input}, cache_read={cache_read}, cache_creation={cache_creation}, output={msg_output}")
+                    print(f"[Token Usage] Total input (incl. cache): {total_input}")
+
                 yield _serialize_message(message)
 
     except Exception as e:
@@ -1249,6 +1289,12 @@ Start by loading the PDF, then list the fields, fill them according to the instr
         import traceback
         traceback.print_exc()
         yield {"type": "error", "error": f"Agent error: {str(e)}"}
+
+    # Log token usage summary
+    turn_type = "CONTINUATION" if is_continuation else "NEW SESSION"
+    print(f"[Token Usage Summary] {turn_type} complete:")
+    print(f"  Total input tokens (incl. cache): {total_input_tokens}")
+    print(f"  Output tokens: {total_output_tokens}")
 
     # Save session state to database for persistence across server restarts
     _session_manager.save_session(session)
@@ -1263,6 +1309,12 @@ Start by loading the PDF, then list the fields, fill them according to the instr
         "applied_edits": dict(session.applied_edits),
         "session_id": agent_session_id,  # Return session_id for frontend to use in next turn
         "user_session_id": session.session_id,  # Return the user session ID for concurrent user tracking
+        "token_usage": {
+            "turn_input_tokens": turn_input_tokens,
+            "turn_output_tokens": turn_output_tokens,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+        },
     }
 
 
