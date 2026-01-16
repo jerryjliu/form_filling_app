@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Form Filler - AI-Powered PDF Form Completion",
-  description: "Fill PDF forms using natural language instructions powered by AI",
+  title: "Form Filler by LlamaIndex",
+  description: "AI-powered PDF form completion by LlamaIndex",
 };
 
 export default function RootLayout({
