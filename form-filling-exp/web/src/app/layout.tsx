@@ -1,20 +1,16 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const ibmPlexMono = IBM_Plex_Mono({
+  variable: "--font-ibm-plex-mono",
   subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: ["400", "500", "600"],
 });
 
 export const metadata: Metadata = {
-  title: "Form Filler - AI-Powered PDF Form Completion",
-  description: "Fill PDF forms using natural language instructions powered by AI",
+  title: "Form Filler by LlamaIndex",
+  description: "AI-powered PDF form completion by LlamaIndex",
 };
 
 export default function RootLayout({
@@ -24,9 +20,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${ibmPlexMono.variable} antialiased`}>
         {children}
       </body>
     </html>

@@ -1,7 +1,40 @@
 @import "tailwindcss";
 
+/* LlamaIndex brand font: Overused Grotesk */
+@font-face {
+  font-family: 'Overused Grotesk';
+  src: url('/fonts/OverusedGrotesk-Roman.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Overused Grotesk';
+  src: url('/fonts/OverusedGrotesk-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Overused Grotesk';
+  src: url('/fonts/OverusedGrotesk-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Overused Grotesk';
+  src: url('/fonts/OverusedGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  /* LlamaCloud-inspired light theme */
+  /* LlamaIndex brand theme */
   --background: #ffffff;
   --background-secondary: #f8f9fa;
   --background-tertiary: #f1f3f4;
@@ -9,9 +42,13 @@
   --foreground-secondary: #4a4a4a;
   --foreground-muted: #6b7280;
   --border: #e5e7eb;
-  --accent: #7c3aed;
-  --accent-hover: #6d28d9;
-  --accent-light: rgba(124, 58, 237, 0.08);
+  /* LlamaIndex brand colors */
+  --accent: #3E18F9;
+  --accent-hover: #37D7FA;
+  --accent-light: rgba(62, 24, 249, 0.08);
+  /* Gradient colors for branding */
+  --accent-gradient-from: #37D7FA;
+  --accent-gradient-to: #3E18F9;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
@@ -31,14 +68,14 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-error: var(--error);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: 'Overused Grotesk', system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), 'IBM Plex Mono', ui-monospace, monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), system-ui, sans-serif;
+  font-family: 'Overused Grotesk', system-ui, sans-serif;
 }
 
 /* Scrollbar styling */

@@ -125,13 +125,13 @@ export default function ApiKeyGate({ children, onApiKeysValidated }: ApiKeyGateP
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-accent to-purple-600 flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </div>
-          <h1 className="text-2xl font-bold text-foreground">PDF Form Filler</h1>
-          <p className="text-foreground-muted mt-2">AI-powered PDF form completion</p>
+          <img
+            src="/llamaindex-logo.png"
+            alt="LlamaIndex"
+            className="w-16 h-16 mx-auto mb-4 rounded-xl"
+          />
+          <h1 className="text-2xl font-bold text-foreground">Form Filler</h1>
+          <p className="text-foreground-muted mt-2">AI-powered PDF form completion by LlamaIndex</p>
         </div>
 
         {/* API Keys Form */}
@@ -228,7 +228,7 @@ export default function ApiKeyGate({ children, onApiKeysValidated }: ApiKeyGateP
 
         {/* Footer */}
         <p className="text-xs text-foreground-muted text-center mt-6">
-          Powered by Claude Agent SDK and LlamaParse
+          Built by <a href="https://llamaindex.ai" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">LlamaIndex</a> · Powered by Claude Agent SDK and LlamaParse
         </p>
       </div>
     </div>
