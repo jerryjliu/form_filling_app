@@ -438,9 +438,9 @@ export default function Home() {
       <header className="flex-shrink-0 px-6 py-3 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-3">
           <img
-            src="/llamaindex-logo.svg"
+            src="/llamaindex-logo.png"
             alt="LlamaIndex"
-            className="w-8 h-8"
+            className="w-8 h-8 rounded-lg"
           />
           <div>
             <h1 className="text-sm font-semibold">Form Filler</h1>

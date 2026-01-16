@@ -126,9 +126,9 @@ export default function ApiKeyGate({ children, onApiKeysValidated }: ApiKeyGateP
         {/* Logo/Header */}
         <div className="text-center mb-8">
           <img
-            src="/llamaindex-logo.svg"
+            src="/llamaindex-logo.png"
             alt="LlamaIndex"
-            className="w-16 h-16 mx-auto mb-4"
+            className="w-16 h-16 mx-auto mb-4 rounded-xl"
           />
           <h1 className="text-2xl font-bold text-foreground">Form Filler</h1>
           <p className="text-foreground-muted mt-2">AI-powered PDF form completion by LlamaIndex</p>
